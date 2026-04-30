@@ -1,0 +1,59 @@
+#!/bin/zsh
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BIN_DIR="$HOME/.local/bin"
+
+usage() {
+  cat <<'TEXT'
+Usage: install [--bin-dir dir]
+
+Install Quillmit by linking the quill command into a directory on PATH.
+TEXT
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --bin-dir)
+      BIN_DIR="${2:-}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      print -u2 -- "Unknown option: $1"
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+if [[ -z "$BIN_DIR" ]]; then
+  print -u2 -- "--bin-dir cannot be empty"
+  exit 1
+fi
+
+mkdir -p "$BIN_DIR"
+
+if [[ -L "$BIN_DIR/gcommit" ]]; then
+  rm "$BIN_DIR/gcommit"
+  print -- "Removed legacy gcommit -> $BIN_DIR/gcommit"
+fi
+
+if [[ -L "$BIN_DIR/quill" ]]; then
+  current_target="$(readlink "$BIN_DIR/quill")"
+  case "$current_target" in
+    "$SCRIPT_DIR/quill")
+      ;;
+    *"/Repositories/codex-gcommit/"*|*"/Repositories/quill/"*)
+      rm "$BIN_DIR/quill"
+      print -- "Removed stale quill symlink -> $current_target"
+      ;;
+  esac
+fi
+
+ln -sfn "$SCRIPT_DIR/quill" "$BIN_DIR/quill"
+
+print -- "Installed quill -> $SCRIPT_DIR/quill"

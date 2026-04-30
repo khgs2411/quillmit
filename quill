@@ -1,0 +1,393 @@
+#!/bin/zsh
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+usage() {
+  cat <<'TEXT'
+Usage: quill [--codex|--claude|--gemini|--provider name] [--config file] [--prepare|--commit|--copy|--quit|--verbose] [repo]
+
+Generate a medium-sized Git commit message, prepare it, then choose an action.
+TEXT
+}
+
+MODE="interactive"
+REPO_INPUT=""
+VERBOSE=0
+PROVIDER=""
+CONFIG_FILE="$SCRIPT_DIR/quill.config"
+
+DEFAULT_PROVIDER=codex
+CODEX_MODEL=gpt-5.3-codex
+CLAUDE_MODEL=haiku
+GEMINI_MODEL=gemini-3-flash-preview
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --prepare)
+      MODE="prepare"
+      shift
+      ;;
+    --yes|--commit)
+      MODE="commit"
+      shift
+      ;;
+    --copy)
+      MODE="copy"
+      shift
+      ;;
+    --quit)
+      MODE="quit"
+      shift
+      ;;
+    --verbose)
+      VERBOSE=1
+      shift
+      ;;
+    --codex)
+      PROVIDER="codex"
+      shift
+      ;;
+    --claude)
+      PROVIDER="claude"
+      shift
+      ;;
+    --gemini)
+      PROVIDER="gemini"
+      shift
+      ;;
+    --provider)
+      PROVIDER="${2:-}"
+      shift 2
+      ;;
+    --config)
+      CONFIG_FILE="${2:-}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      REPO_INPUT="$1"
+      shift
+      ;;
+  esac
+done
+
+if [[ -n "$CONFIG_FILE" && -f "$CONFIG_FILE" ]]; then
+  source "$CONFIG_FILE"
+fi
+
+if [[ -z "$PROVIDER" ]]; then
+  PROVIDER="$DEFAULT_PROVIDER"
+fi
+
+case "$PROVIDER" in
+  codex|claude|gemini) ;;
+  *)
+    print -u2 -- "Unknown provider: $PROVIDER"
+    exit 1
+    ;;
+esac
+
+provider_label() {
+  case "$PROVIDER" in
+    codex) print -- "Codex" ;;
+    claude) print -- "Claude" ;;
+    gemini) print -- "Gemini" ;;
+  esac
+}
+
+provider_command() {
+  case "$PROVIDER" in
+    codex) print -- "codex" ;;
+    claude) print -- "claude" ;;
+    gemini) print -- "gemini" ;;
+  esac
+}
+
+provider_model() {
+  case "$PROVIDER" in
+    codex) print -- "$CODEX_MODEL" ;;
+    claude) print -- "$CLAUDE_MODEL" ;;
+    gemini) print -- "$GEMINI_MODEL" ;;
+  esac
+}
+
+if [[ -z "$REPO_INPUT" ]]; then
+  REPO_INPUT="$PWD"
+fi
+
+if [[ ! -d "$REPO_INPUT" ]]; then
+  print -u2 -- "Not a directory: $REPO_INPUT"
+  exit 1
+fi
+
+REPO="$(git -C "$REPO_INPUT" rev-parse --show-toplevel 2>/dev/null)" || {
+  print -u2 -- "Not inside a Git repository: $REPO_INPUT"
+  exit 1
+}
+
+if [[ -z "$(git -C "$REPO" status --short)" ]]; then
+  print -- "No changes to commit in $REPO"
+  exit 0
+fi
+
+if [[ -n "$(git -C "$REPO" diff --cached --name-only)" ]]; then
+  CONTEXT_MODE="staged changes only"
+else
+  CONTEXT_MODE="all changed files"
+fi
+
+CLI="$(provider_command)"
+MODEL="$(provider_model)"
+LABEL="$(provider_label)"
+
+if ! command -v "$CLI" >/dev/null 2>&1; then
+  print -u2 -- "$LABEL CLI not found in PATH: $CLI"
+  exit 1
+fi
+
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/quill.XXXXXX")"
+trap 'rm -rf "$TMP_DIR"' EXIT
+MESSAGE_FILE="$TMP_DIR/message.txt"
+PROMPT_FILE="$TMP_DIR/prompt.txt"
+LOG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/quill"
+LOG_FILE="$LOG_DIR/last.log"
+if ! { mkdir -p "$LOG_DIR" && : > "$LOG_FILE"; } 2>/dev/null; then
+  LOG_DIR="${TMPDIR:-/tmp}/quill"
+  mkdir -p "$LOG_DIR"
+  LOG_FILE="$LOG_DIR/last.log"
+  : > "$LOG_FILE"
+fi
+SPINNER_PID=""
+
+write_git_context() {
+  {
+    print -- "Generate a git commit message from the Git context below."
+    print -- ""
+    print -- "Do not inspect the repository yourself. Do not run commands. Do not modify files. Do not stage files. Do not commit."
+    print -- ""
+    print -- "Return only the commit message text."
+    print -- ""
+    print -- "Requirements:"
+    print -- "- Use a clear, normal title by default."
+    print -- "- Do not use conventional commit prefixes such as feat:, feat(scope):, fix:, chore:, docs:, refactor:, or test:."
+    print -- "- Bad: feat(pipeline): add telemetry"
+    print -- "- Bad: chore: update release scripts"
+    print -- "- Good: Add run-profile telemetry for compile/update orchestration"
+    print -- "- Good, only when the type is obvious: Feature: Add run-profile telemetry for compile/update orchestration"
+    print -- "- Good, only for an obvious defect repair: Bug: Fix route-health status reporting"
+    print -- "- Make it medium length: one title line, a blank line, then 2-4 concise body lines or sentences."
+    print -- "- Mention the actual intent of the diff, not a mechanical file list."
+    print -- "- Do not wrap the answer in Markdown or quotes."
+    print -- ""
+    print -- "Repository:"
+    print -- "$REPO"
+    print -- ""
+    print -- "Context mode: $CONTEXT_MODE"
+    print -- ""
+    if [[ "$CONTEXT_MODE" == "staged changes only" ]]; then
+      print -- "Staged files:"
+      git -C "$REPO" diff --cached --name-status
+      print -- ""
+      print -- "Staged diff --stat:"
+      git -C "$REPO" diff --cached --stat
+      print -- ""
+      print -- "Staged diff:"
+      git -C "$REPO" diff --cached --no-ext-diff
+    else
+      print -- "Git status --short:"
+      git -C "$REPO" status --short
+      print -- ""
+      print -- "Unstaged diff --stat:"
+      git -C "$REPO" diff --stat
+      print -- ""
+      print -- "Unstaged diff:"
+      git -C "$REPO" diff --no-ext-diff
+      print -- ""
+      print -- "Untracked files:"
+      git -C "$REPO" ls-files --others --exclude-standard
+    fi
+  } > "$PROMPT_FILE"
+}
+
+clean_message() {
+  sed -e 's/^```[[:alnum:]_-]*$//' -e 's/^```$//' "$MESSAGE_FILE" > "$MESSAGE_FILE.cleaned"
+  mv "$MESSAGE_FILE.cleaned" "$MESSAGE_FILE"
+}
+
+start_progress() {
+  if [[ "$VERBOSE" -eq 1 ]]; then
+    return
+  fi
+
+  if [[ -t 1 ]]; then
+    (
+      frames=("|" "/" "-" "\\")
+      i=1
+      while true; do
+        print -n -- $'\r'"Generating commit message with $LABEL ${frames[$i]} "
+        i=$((i % ${#frames[@]} + 1))
+        sleep 0.12
+      done
+    ) &
+    SPINNER_PID="$!"
+  else
+    print -- "Generating commit message with $LABEL..."
+  fi
+}
+
+stop_progress() {
+  local ok="$1"
+  if [[ "$VERBOSE" -eq 1 ]]; then
+    return
+  fi
+
+  if [[ -n "$SPINNER_PID" ]]; then
+    kill "$SPINNER_PID" >/dev/null 2>&1 || true
+    wait "$SPINNER_PID" 2>/dev/null || true
+    SPINNER_PID=""
+    if [[ "$ok" -eq 1 ]]; then
+      print -- $'\r'"Generated commit message with $LABEL.      "
+    else
+      print -- $'\r'"$LABEL failed while generating message.    "
+    fi
+  fi
+}
+
+run_provider() {
+  case "$PROVIDER" in
+    codex)
+      codex exec \
+        -m "$MODEL" \
+        --cd "$REPO" \
+        --sandbox read-only \
+        --ephemeral \
+        -o "$MESSAGE_FILE" \
+        - < "$PROMPT_FILE"
+      ;;
+    claude)
+      claude \
+        --bare \
+        -p \
+        --model "$MODEL" \
+        --output-format text \
+        "Use stdin as the full task. Return only the commit message." \
+        < "$PROMPT_FILE" > "$MESSAGE_FILE"
+      ;;
+    gemini)
+      gemini \
+        -p "Use stdin as the full task. Return only the commit message." \
+        --model "$MODEL" \
+        < "$PROMPT_FILE" > "$MESSAGE_FILE"
+      ;;
+  esac
+}
+
+generate_message() {
+  write_git_context
+
+  if [[ "$VERBOSE" -eq 1 ]]; then
+    run_provider
+  else
+    start_progress
+    if ! run_provider > "$LOG_FILE" 2>&1; then
+      stop_progress 0
+      print -u2 -- "$LABEL failed. Log: $LOG_FILE"
+      return 1
+    fi
+    stop_progress 1
+  fi
+
+  clean_message
+}
+
+show_message() {
+  print -- ""
+  print -- "Generated commit message:"
+  print -- "-------------------------"
+  cat "$MESSAGE_FILE"
+  print -- ""
+  print -- "-------------------------"
+}
+
+commit_message() {
+  git -C "$REPO" add -A
+  git -C "$REPO" commit -F "$MESSAGE_FILE"
+}
+
+prepare_message() {
+  local editmsg
+  editmsg="$(git -C "$REPO" rev-parse --path-format=absolute --git-path COMMIT_EDITMSG)"
+  mkdir -p "$(dirname "$editmsg")"
+  cp "$MESSAGE_FILE" "$editmsg"
+  print -- "Prepared commit message at $editmsg"
+}
+
+copy_message() {
+  if ! command -v pbcopy >/dev/null 2>&1; then
+    print -u2 -- "pbcopy not found"
+    return 1
+  fi
+  pbcopy < "$MESSAGE_FILE"
+  print -- "Copied commit message to clipboard"
+}
+
+generate_message
+show_message
+
+if [[ "$MODE" == "interactive" ]]; then
+  prepare_message
+fi
+
+case "$MODE" in
+  prepare)
+    prepare_message
+    exit 0
+    ;;
+  commit)
+    commit_message
+    exit 0
+    ;;
+  copy)
+    prepare_message
+    copy_message
+    exit 0
+    ;;
+  quit)
+    print -- "Quit without preparing or committing"
+    exit 0
+    ;;
+esac
+
+while true; do
+  print -n -- "[c]ommit, [e]dit, co[p]y, [r]egenerate, [q]uit: "
+  read -r choice
+
+  case "${choice:l}" in
+    c|commit)
+      commit_message
+      exit 0
+      ;;
+    e|edit)
+      "${EDITOR:-vi}" "$MESSAGE_FILE"
+      show_message
+      ;;
+    p|copy)
+      copy_message
+      ;;
+    r|regenerate)
+      generate_message
+      show_message
+      ;;
+    q|quit|"")
+      print -- "Quit without committing"
+      exit 0
+      ;;
+    *)
+      print -- "Choose c, e, p, r, or q."
+      ;;
+  esac
+done

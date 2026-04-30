@@ -21,6 +21,7 @@ The project is Quillmit. The executable is `quill`.
 - Supports Codex, Claude Code, and Gemini CLI.
 - Reads staged changes first; if nothing is staged, reads the working tree.
 - Prepares `.git/COMMIT_EDITMSG` by default.
+- Copies messages with `pbcopy`, `wl-copy`, `xclip`, or `xsel`.
 - Keeps provider transcripts hidden unless `--verbose` is enabled.
 - Avoids noisy conventional commit prefixes like `feat(scope):` and `chore:`.
 - Has a shell-only test suite with fake provider CLIs.
@@ -34,6 +35,34 @@ At least one provider CLI must be installed and authenticated:
 - Gemini CLI for `--gemini`.
 
 Quillmit does not install or authenticate provider CLIs for you.
+
+## Compatibility
+
+| Platform | Status | Notes |
+| --- | --- | --- |
+| macOS | Supported | Uses `pbcopy` for `--copy`. |
+| Linux | Best effort | Uses `wl-copy`, `xclip`, or `xsel` for `--copy`. |
+| Windows | Not supported | WSL may work if provider CLIs and clipboard tools are available. |
+
+## Demo
+
+```text
+$ quill
+Generating commit message with Codex |
+Generated commit message with Codex.
+
+Generated commit message:
+-------------------------
+Add provider-aware commit message preparation
+
+Route the current Git context through the selected AI CLI and keep provider
+output quiet by default.
+Prepare COMMIT_EDITMSG before prompting so normal git commit remains available.
+Support commit, copy, regenerate, and quit actions from the terminal flow.
+-------------------------
+Prepared commit message at /path/to/repo/.git/COMMIT_EDITMSG
+[c]ommit, [e]dit, co[p]y, [r]egenerate, [q]uit:
+```
 
 ## Install
 

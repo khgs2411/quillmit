@@ -87,6 +87,12 @@ set -euo pipefail
 cat > "${PBCOPY_CAPTURE:?PBCOPY_CAPTURE is required}"
 SCRIPT
   chmod +x "$bin/pbcopy"
+  cat > "$bin/wl-copy" <<'SCRIPT'
+#!/bin/zsh
+set -euo pipefail
+cat > "${WLCOPY_CAPTURE:?WLCOPY_CAPTURE is required}"
+SCRIPT
+  chmod +x "$bin/wl-copy"
   print -r -- "$bin:$PATH"
 }
 
@@ -282,6 +288,24 @@ test_copy_mode_copies_without_committing() {
   [[ -n "$(git -C "$repo" status --short)" ]] || fail "expected repo to remain dirty after copy"
 }
 
+test_copy_mode_supports_linux_clipboard_fallback() {
+  local repo="$TMP_ROOT/copy-linux"
+  make_dirty_repo "$repo"
+  local copy_capture="$TMP_ROOT/wl-copied-message.txt"
+  local fake_path="$(make_fake_bin)"
+  cat > "${fake_path%%:*}/pbcopy" <<'SCRIPT'
+#!/bin/zsh
+exit 1
+SCRIPT
+  chmod +x "${fake_path%%:*}/pbcopy"
+
+  local output
+  output="$(WLCOPY_CAPTURE="$copy_capture" PATH="$fake_path" "$ROOT/quill" --copy "$repo")"
+
+  assert_contains "$output" "Copied commit message to clipboard"
+  assert_contains "$(<"$copy_capture")" "Add terminal commit message helper"
+}
+
 test_install_links_quill_only() {
   local install_bin="$TMP_ROOT/install-bin"
   mkdir -p "$install_bin"
@@ -313,6 +337,7 @@ test_config_overrides_default_provider_and_models
 test_commits_with_generated_message
 test_commit_alias_commits_with_generated_message
 test_copy_mode_copies_without_committing
+test_copy_mode_supports_linux_clipboard_fallback
 test_install_links_quill_only
 
 print -- "All tests passed"

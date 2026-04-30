@@ -1,0 +1,23 @@
+name: Test
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+
+jobs:
+  shell-tests:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Syntax check
+        run: |
+          zsh -n quill
+          zsh -n install
+          zsh -n test_quill.sh
+
+      - name: Run tests
+        run: zsh test_quill.sh

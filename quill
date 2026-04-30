@@ -327,11 +327,23 @@ prepare_message() {
 }
 
 copy_message() {
-  if ! command -v pbcopy >/dev/null 2>&1; then
-    print -u2 -- "pbcopy not found"
+  local copied=0
+
+  if command -v pbcopy >/dev/null 2>&1 && pbcopy < "$MESSAGE_FILE"; then
+    copied=1
+  elif command -v wl-copy >/dev/null 2>&1 && wl-copy < "$MESSAGE_FILE"; then
+    copied=1
+  elif command -v xclip >/dev/null 2>&1 && xclip -selection clipboard < "$MESSAGE_FILE"; then
+    copied=1
+  elif command -v xsel >/dev/null 2>&1 && xsel --clipboard --input < "$MESSAGE_FILE"; then
+    copied=1
+  fi
+
+  if [[ "$copied" -ne 1 ]]; then
+    print -u2 -- "No clipboard command succeeded. Tried pbcopy, wl-copy, xclip, and xsel."
     return 1
   fi
-  pbcopy < "$MESSAGE_FILE"
+
   print -- "Copied commit message to clipboard"
 }
 

@@ -249,6 +249,7 @@ CONFIG
 test_commits_with_generated_message() {
   local repo="$TMP_ROOT/commit"
   make_dirty_repo "$repo"
+  git -C "$repo" add file.txt
   git -C "$repo" config user.email "test@example.com"
   git -C "$repo" config user.name "Test User"
 
@@ -260,9 +261,84 @@ test_commits_with_generated_message() {
   [[ -z "$(git -C "$repo" status --short)" ]] || fail "expected repo to be clean after commit"
 }
 
+test_commits_only_staged_changes_when_staged_changes_exist() {
+  local repo="$TMP_ROOT/staged-commit"
+  git init "$repo" >/dev/null
+  print -r -- "base" > "$repo/file.txt"
+  git -C "$repo" add file.txt
+  git -C "$repo" config user.email "test@example.com"
+  git -C "$repo" config user.name "Test User"
+  git -C "$repo" commit -m "Initial" >/dev/null
+  print -r -- "staged" > "$repo/file.txt"
+  git -C "$repo" add file.txt
+  print -r -- "unstaged" > "$repo/other.txt"
+
+  PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --commit "$repo" >/dev/null
+
+  local subject
+  subject="$(git -C "$repo" log -1 --pretty=%s)"
+  [[ "$subject" == "Add terminal commit message helper" ]] || fail "unexpected commit subject: $subject"
+  [[ "$(git -C "$repo" show --pretty= --name-only HEAD)" == "file.txt" ]] || fail "expected only staged file to be committed"
+  [[ "$(git -C "$repo" status --short)" == "?? other.txt" ]] || fail "expected unstaged file to remain uncommitted"
+}
+
+test_commit_mode_fails_cleanly_without_staged_changes() {
+  local repo="$TMP_ROOT/commit-no-staged"
+  make_dirty_repo "$repo"
+  local output_file="$TMP_ROOT/commit-no-staged-output.txt"
+
+  if PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --commit "$repo" > "$output_file" 2>&1; then
+    fail "expected commit mode to fail when no changes are staged"
+  fi
+
+  local output
+  output="$(<"$output_file")"
+  assert_contains "$output" "No staged changes to commit."
+  assert_contains "$output" "Stage files with git add <file> and run quill again."
+  assert_not_contains "$output" "Changes not staged for commit:"
+  assert_not_contains "$output" "no changes added to commit"
+  [[ -n "$(git -C "$repo" status --short)" ]] || fail "expected repo to remain dirty"
+}
+
+test_add_flag_stages_all_changes_before_commit() {
+  local repo="$TMP_ROOT/add-commit"
+  make_dirty_repo "$repo"
+  git -C "$repo" config user.email "test@example.com"
+  git -C "$repo" config user.name "Test User"
+
+  PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --add --commit "$repo" >/dev/null
+
+  local subject
+  subject="$(git -C "$repo" log -1 --pretty=%s)"
+  [[ "$subject" == "Add terminal commit message helper" ]] || fail "unexpected commit subject: $subject"
+  [[ "$(git -C "$repo" show --pretty= --name-only HEAD)" == "file.txt" ]] || fail "expected add flag to commit unstaged file"
+  [[ -z "$(git -C "$repo" status --short)" ]] || fail "expected repo to be clean after add commit"
+}
+
+test_add_flag_generates_context_from_all_changes() {
+  local repo="$TMP_ROOT/add-context"
+  git init "$repo" >/dev/null
+  print -r -- "base" > "$repo/file.txt"
+  git -C "$repo" add file.txt
+  git -C "$repo" config user.email "test@example.com"
+  git -C "$repo" config user.name "Test User"
+  git -C "$repo" commit -m "Initial" >/dev/null
+  print -r -- "staged" > "$repo/file.txt"
+  git -C "$repo" add file.txt
+  print -r -- "unstaged" > "$repo/other.txt"
+  local prompt_capture="$TMP_ROOT/add-context-prompt.txt"
+
+  QUILL_STDIN_CAPTURE="$prompt_capture" PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --add --quit "$repo" >/dev/null
+
+  assert_contains "$(<"$prompt_capture")" "Context mode: all changed files"
+  assert_contains "$(<"$prompt_capture")" "Untracked files:"
+  assert_contains "$(<"$prompt_capture")" "other.txt"
+}
+
 test_commit_alias_commits_with_generated_message() {
   local repo="$TMP_ROOT/commit-alias"
   make_dirty_repo "$repo"
+  git -C "$repo" add file.txt
   git -C "$repo" config user.email "test@example.com"
   git -C "$repo" config user.name "Test User"
 
@@ -335,6 +411,10 @@ test_claude_provider_uses_configured_model
 test_gemini_provider_uses_configured_model
 test_config_overrides_default_provider_and_models
 test_commits_with_generated_message
+test_commits_only_staged_changes_when_staged_changes_exist
+test_commit_mode_fails_cleanly_without_staged_changes
+test_add_flag_stages_all_changes_before_commit
+test_add_flag_generates_context_from_all_changes
 test_commit_alias_commits_with_generated_message
 test_copy_mode_copies_without_committing
 test_copy_mode_supports_linux_clipboard_fallback

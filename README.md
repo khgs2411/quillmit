@@ -20,6 +20,7 @@ The project is Quillmit. The executable is `quill`.
 - Uses your local AI CLI subscriptions instead of a separate hosted service.
 - Supports Codex, Claude Code, and Gemini CLI.
 - Reads staged changes first; if nothing is staged, reads the working tree.
+- Commits only staged changes unless `--add` is passed.
 - Prepares `.git/COMMIT_EDITMSG` by default.
 - Copies messages with `pbcopy`, `wl-copy`, `xclip`, or `xsel`.
 - Keeps provider transcripts hidden unless `--verbose` is enabled.
@@ -90,6 +91,7 @@ previews it, prepares `.git/COMMIT_EDITMSG`, then asks what to do next.
 
 If files are staged, Quillmit generates the message from staged changes only.
 If nothing is staged, it generates from the changed working tree.
+Commit actions only commit staged changes by default.
 
 By default it uses Codex. Other providers:
 
@@ -112,6 +114,15 @@ quill --commit
 ```
 
 `--yes` is still accepted as an alias.
+
+To stage all changes before committing:
+
+```sh
+quill --add --commit
+```
+
+In interactive mode, `quill --add` generates from all changed files and stages
+everything only if you choose `[c]ommit`.
 
 To generate, preview, copy the message, and exit without committing:
 

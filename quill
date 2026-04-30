@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 usage() {
   cat <<'TEXT'
-Usage: quill [--codex|--claude|--gemini|--provider name] [--config file] [--prepare|--commit|--copy|--quit|--verbose] [repo]
+Usage: quill [--codex|--claude|--gemini|--provider name] [--config file] [--prepare|--commit|--copy|--quit|--add|--verbose] [repo]
 
 Generate a medium-sized Git commit message, prepare it, then choose an action.
 TEXT
@@ -14,6 +14,7 @@ TEXT
 MODE="interactive"
 REPO_INPUT=""
 VERBOSE=0
+ADD_ALL=0
 PROVIDER=""
 CONFIG_FILE="$SCRIPT_DIR/quill.config"
 
@@ -42,6 +43,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --verbose)
       VERBOSE=1
+      shift
+      ;;
+    --add)
+      ADD_ALL=1
       shift
       ;;
     --codex)
@@ -134,7 +139,9 @@ if [[ -z "$(git -C "$REPO" status --short)" ]]; then
   exit 0
 fi
 
-if [[ -n "$(git -C "$REPO" diff --cached --name-only)" ]]; then
+if [[ "$ADD_ALL" -eq 1 ]]; then
+  CONTEXT_MODE="all changed files"
+elif [[ -n "$(git -C "$REPO" diff --cached --name-only)" ]]; then
   CONTEXT_MODE="staged changes only"
 else
   CONTEXT_MODE="all changed files"
@@ -314,7 +321,16 @@ show_message() {
 }
 
 commit_message() {
-  git -C "$REPO" add -A
+  if [[ "$ADD_ALL" -eq 1 ]]; then
+    git -C "$REPO" add -A
+  fi
+
+  if [[ -z "$(git -C "$REPO" diff --cached --name-only)" ]]; then
+    print -u2 -- "No staged changes to commit."
+    print -u2 -- "Stage files with git add <file> and run quill again."
+    return 1
+  fi
+
   git -C "$REPO" commit -F "$MESSAGE_FILE"
 }
 

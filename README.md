@@ -1,6 +1,53 @@
 # Quillmit
 
-Terminal-first commit message helper powered by headless AI CLIs.
+Terminal-first commit message helper powered by your existing AI subscriptions.
+
+Quillmit turns your current Git diff into a useful commit message by using the
+AI CLIs you already pay for: Codex by default, with optional Claude Code and
+Gemini CLI support. It stays local, dependency-light, and explicit about when it
+commits.
+
+The command is:
+
+```sh
+quill
+```
+
+The project is Quillmit. The executable is `quill`.
+
+## Features
+
+- Uses your local AI CLI subscriptions instead of a separate hosted service.
+- Supports Codex, Claude Code, and Gemini CLI.
+- Reads staged changes first; if nothing is staged, reads the working tree.
+- Prepares `.git/COMMIT_EDITMSG` by default.
+- Keeps provider transcripts hidden unless `--verbose` is enabled.
+- Avoids noisy conventional commit prefixes like `feat(scope):` and `chore:`.
+- Has a shell-only test suite with fake provider CLIs.
+
+## Requirements
+
+At least one provider CLI must be installed and authenticated:
+
+- Codex CLI for the default provider.
+- Claude Code CLI for `--claude`.
+- Gemini CLI for `--gemini`.
+
+Quillmit does not install or authenticate provider CLIs for you.
+
+## Install
+
+Clone the repository and run the installer:
+
+```sh
+git clone https://github.com/khgs2411/quillmit.git
+cd quillmit
+./install
+```
+
+This links `quill` into `~/.local/bin`.
+
+Make sure `~/.local/bin` is on your `PATH`.
 
 ## Usage
 
@@ -93,19 +140,22 @@ If that cache directory is not writable, it falls back to:
 $TMPDIR/quill/last.log
 ```
 
-## Install
+## Development
 
 ```sh
-/Users/liadgoren/Repositories/quillmit/install
+zsh test_quill.sh
 ```
 
-This links `quill` into `~/.local/bin`.
-It also removes legacy Quillmit-related symlinks installed by earlier local
-versions, such as `gcommit` and stale `quill` links pointing at old project
-folders.
+The tests use fake provider CLIs and do not call real AI services.
 
-To install somewhere else:
+## License
+
+MIT. See [LICENSE](LICENSE).
+
+## Local Install From This Checkout
+
+If you are developing Quillmit locally:
 
 ```sh
-/Users/liadgoren/Repositories/quillmit/install --bin-dir /path/on/PATH
+./install --bin-dir /path/on/PATH
 ```

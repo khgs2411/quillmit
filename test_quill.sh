@@ -22,6 +22,12 @@ assert_not_contains() {
   [[ "$haystack" != *"$needle"* ]] || fail "expected output not to contain: $needle"
 }
 
+assert_equals() {
+  local actual="$1"
+  local expected="$2"
+  [[ "$actual" == "$expected" ]] || fail "expected '$expected' but got '$actual'"
+}
+
 write_fake_cli() {
   local cli_path="$1"
   local name="$2"
@@ -99,6 +105,20 @@ SCRIPT
 make_dirty_repo() {
   local repo="$1"
   git init "$repo" >/dev/null
+  print -r -- "hello" > "$repo/file.txt"
+}
+
+make_dirty_repo_with_remote() {
+  local repo="$1"
+  local remote="$2"
+  git init --bare "$remote" >/dev/null
+  git init "$repo" >/dev/null
+  git -C "$repo" config user.email "test@example.com"
+  git -C "$repo" config user.name "Test User"
+  git -C "$repo" branch -M main
+  git -C "$repo" remote add origin "$remote"
+  git -C "$repo" config branch.main.remote origin
+  git -C "$repo" config branch.main.merge refs/heads/main
   print -r -- "hello" > "$repo/file.txt"
 }
 
@@ -382,6 +402,156 @@ SCRIPT
   assert_contains "$(<"$copy_capture")" "Add terminal commit message helper"
 }
 
+test_commit_push_pushes_staged_commit() {
+  local repo="$TMP_ROOT/push-commit"
+  local remote="$TMP_ROOT/push-commit.git"
+  make_dirty_repo_with_remote "$repo" "$remote"
+  git -C "$repo" add file.txt
+
+  PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --commit --push "$repo" >/dev/null
+
+  assert_equals "$(git --git-dir "$remote" log -1 --pretty=%s)" "Add terminal commit message helper"
+  [[ -z "$(git -C "$repo" status --short)" ]] || fail "expected repo to be clean after pushed commit"
+}
+
+test_yes_push_pushes_staged_commit() {
+  local repo="$TMP_ROOT/yes-push"
+  local remote="$TMP_ROOT/yes-push.git"
+  make_dirty_repo_with_remote "$repo" "$remote"
+  git -C "$repo" add file.txt
+
+  PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --yes --push "$repo" >/dev/null
+
+  assert_equals "$(git --git-dir "$remote" log -1 --pretty=%s)" "Add terminal commit message helper"
+}
+
+test_full_stages_commits_and_pushes_all_changes() {
+  local repo="$TMP_ROOT/full"
+  local remote="$TMP_ROOT/full.git"
+  make_dirty_repo_with_remote "$repo" "$remote"
+
+  PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --full "$repo" >/dev/null
+
+  assert_equals "$(git --git-dir "$remote" log -1 --pretty=%s)" "Add terminal commit message helper"
+  assert_equals "$(git -C "$repo" show --pretty= --name-only HEAD)" "file.txt"
+  [[ -z "$(git -C "$repo" status --short)" ]] || fail "expected repo to be clean after full push"
+}
+
+test_push_does_not_run_when_commit_has_no_staged_changes() {
+  local repo="$TMP_ROOT/push-no-staged"
+  local remote="$TMP_ROOT/push-no-staged.git"
+  make_dirty_repo_with_remote "$repo" "$remote"
+  local output_file="$TMP_ROOT/push-no-staged-output.txt"
+
+  if PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --commit --push "$repo" > "$output_file" 2>&1; then
+    fail "expected commit push to fail without staged changes"
+  fi
+
+  local output
+  output="$(<"$output_file")"
+  assert_contains "$output" "No staged changes to commit."
+  assert_not_contains "$output" "Push failed. Commit remains local."
+  if git --git-dir "$remote" rev-parse --verify HEAD >/dev/null 2>&1; then
+    fail "expected remote to remain without commits"
+  fi
+}
+
+test_push_failure_leaves_local_commit() {
+  local repo="$TMP_ROOT/push-failure"
+  local remote="$TMP_ROOT/push-failure.git"
+  make_dirty_repo_with_remote "$repo" "$remote"
+  git -C "$repo" add file.txt
+  rm -rf "$remote"
+  local output_file="$TMP_ROOT/push-failure-output.txt"
+
+  if PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --commit --push "$repo" > "$output_file" 2>&1; then
+    fail "expected push failure to return nonzero"
+  fi
+
+  local output
+  output="$(<"$output_file")"
+  assert_contains "$output" "Push failed. Commit remains local."
+  assert_equals "$(git -C "$repo" log -1 --pretty=%s)" "Add terminal commit message helper"
+  [[ -z "$(git -C "$repo" status --short)" ]] || fail "expected local commit to remain clean"
+}
+
+test_interactive_push_pushes_only_after_commit_choice() {
+  local repo="$TMP_ROOT/interactive-push"
+  local remote="$TMP_ROOT/interactive-push.git"
+  make_dirty_repo_with_remote "$repo" "$remote"
+  git -C "$repo" add file.txt
+
+  print c | PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --push "$repo" >/dev/null
+
+  assert_equals "$(git --git-dir "$remote" log -1 --pretty=%s)" "Add terminal commit message helper"
+}
+
+test_interactive_push_does_not_push_after_quit_choice() {
+  local repo="$TMP_ROOT/interactive-push-quit"
+  local remote="$TMP_ROOT/interactive-push-quit.git"
+  make_dirty_repo_with_remote "$repo" "$remote"
+  git -C "$repo" add file.txt
+
+  print q | PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --push "$repo" >/dev/null
+
+  if git --git-dir "$remote" rev-parse --verify HEAD >/dev/null 2>&1; then
+    fail "expected remote to remain without commits after quit"
+  fi
+  [[ -n "$(git -C "$repo" status --short)" ]] || fail "expected repo to remain dirty after quit"
+}
+
+test_push_rejects_non_commit_modes_before_generation() {
+  local repo="$TMP_ROOT/push-invalid-copy"
+  make_dirty_repo "$repo"
+  local output_file="$TMP_ROOT/push-invalid-copy-output.txt"
+
+  if PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --copy --push "$repo" > "$output_file" 2>&1; then
+    fail "expected --copy --push to fail"
+  fi
+
+  local output
+  output="$(<"$output_file")"
+  assert_contains "$output" "--push cannot be combined with --copy"
+  assert_not_contains "$output" "Generating commit message"
+  assert_not_contains "$output" "Add terminal commit message helper"
+}
+
+test_full_rejects_non_commit_modes_regardless_of_order() {
+  local repo="$TMP_ROOT/full-invalid-quit"
+  make_dirty_repo "$repo"
+  local output_file="$TMP_ROOT/full-invalid-quit-output.txt"
+
+  if PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --full --quit "$repo" > "$output_file" 2>&1; then
+    fail "expected --full --quit to fail"
+  fi
+
+  local output
+  output="$(<"$output_file")"
+  assert_contains "$output" "--full cannot be combined with --quit"
+  assert_not_contains "$output" "Generating commit message"
+  assert_not_contains "$output" "Add terminal commit message helper"
+
+  output_file="$TMP_ROOT/full-invalid-prepare-output.txt"
+  if PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --prepare --full "$repo" > "$output_file" 2>&1; then
+    fail "expected --prepare --full to fail"
+  fi
+
+  output="$(<"$output_file")"
+  assert_contains "$output" "--full cannot be combined with --prepare"
+  assert_not_contains "$output" "Generating commit message"
+  assert_not_contains "$output" "Add terminal commit message helper"
+}
+
+test_readme_documents_push_and_full_flags() {
+  local readme
+  readme="$(<"$ROOT/README.md")"
+
+  assert_contains "$readme" "quill --commit --push"
+  assert_contains "$readme" "quill --add --commit --push"
+  assert_contains "$readme" "quill --full"
+  assert_contains "$readme" "Push failures leave the local commit in place."
+}
+
 test_install_links_quill_only() {
   local install_bin="$TMP_ROOT/install-bin"
   mkdir -p "$install_bin"
@@ -418,6 +588,16 @@ test_add_flag_generates_context_from_all_changes
 test_commit_alias_commits_with_generated_message
 test_copy_mode_copies_without_committing
 test_copy_mode_supports_linux_clipboard_fallback
+test_commit_push_pushes_staged_commit
+test_yes_push_pushes_staged_commit
+test_full_stages_commits_and_pushes_all_changes
+test_push_does_not_run_when_commit_has_no_staged_changes
+test_push_failure_leaves_local_commit
+test_interactive_push_pushes_only_after_commit_choice
+test_interactive_push_does_not_push_after_quit_choice
+test_push_rejects_non_commit_modes_before_generation
+test_full_rejects_non_commit_modes_regardless_of_order
+test_readme_documents_push_and_full_flags
 test_install_links_quill_only
 
 print -- "All tests passed"

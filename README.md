@@ -111,6 +111,7 @@ For non-interactive commit after preview:
 
 ```sh
 quill --commit
+quill --commit --push
 ```
 
 `--yes` is still accepted as an alias.
@@ -119,10 +120,16 @@ To stage all changes before committing:
 
 ```sh
 quill --add --commit
+quill --add --commit --push
+quill --full
 ```
 
 In interactive mode, `quill --add` generates from all changed files and stages
-everything only if you choose `[c]ommit`.
+everything only if you choose `[c]ommit`. `quill --full` is equivalent to
+`quill --add --commit --push`.
+
+`--push` runs `git push` only after a successful local commit. In interactive
+mode, `quill --push` pushes only if you choose `[c]ommit`. Push failures leave the local commit in place.
 
 To generate, preview, copy the message, and exit without committing:
 

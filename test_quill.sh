@@ -104,15 +104,16 @@ SCRIPT
 
 make_dirty_repo() {
   local repo="$1"
-  git init "$repo" >/dev/null
+  git init -q "$repo"
   print -r -- "hello" > "$repo/file.txt"
 }
 
 make_dirty_repo_with_remote() {
   local repo="$1"
   local remote="$2"
-  git init --bare "$remote" >/dev/null
-  git init "$repo" >/dev/null
+  git init --bare -q "$remote"
+  git --git-dir "$remote" symbolic-ref HEAD refs/heads/main
+  git init -q "$repo"
   git -C "$repo" config user.email "test@example.com"
   git -C "$repo" config user.name "Test User"
   git -C "$repo" branch -M main
@@ -129,7 +130,7 @@ commit_editmsg_path() {
 
 test_clean_repo_reports_no_changes() {
   local repo="$TMP_ROOT/clean"
-  git init "$repo" >/dev/null
+  git init -q "$repo"
 
   local output
   output="$(PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --quit "$repo")"
@@ -200,7 +201,7 @@ test_quit_prints_without_preparing() {
 
 test_staged_changes_use_staged_context_only() {
   local repo="$TMP_ROOT/staged"
-  git init "$repo" >/dev/null
+  git init -q "$repo"
   print -r -- "base" > "$repo/file.txt"
   git -C "$repo" add file.txt
   git -C "$repo" config user.email "test@example.com"
@@ -283,7 +284,7 @@ test_commits_with_generated_message() {
 
 test_commits_only_staged_changes_when_staged_changes_exist() {
   local repo="$TMP_ROOT/staged-commit"
-  git init "$repo" >/dev/null
+  git init -q "$repo"
   print -r -- "base" > "$repo/file.txt"
   git -C "$repo" add file.txt
   git -C "$repo" config user.email "test@example.com"
@@ -337,7 +338,7 @@ test_add_flag_stages_all_changes_before_commit() {
 
 test_add_flag_generates_context_from_all_changes() {
   local repo="$TMP_ROOT/add-context"
-  git init "$repo" >/dev/null
+  git init -q "$repo"
   print -r -- "base" > "$repo/file.txt"
   git -C "$repo" add file.txt
   git -C "$repo" config user.email "test@example.com"

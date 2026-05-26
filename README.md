@@ -164,7 +164,7 @@ Edit `quill.config`:
 ```sh
 DEFAULT_PROVIDER=codex
 
-CODEX_MODEL=gpt-5.3-codex
+CODEX_MODEL=gpt-5.3-codex-spark
 CLAUDE_MODEL=haiku
 GEMINI_MODEL=gemini-3-flash-preview
 ```

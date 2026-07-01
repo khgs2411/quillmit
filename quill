@@ -167,8 +167,10 @@ if [[ -z "$(git -C "$REPO" status --short)" ]]; then
 fi
 
 if [[ "$ADD_ALL" -eq 1 ]]; then
-  CONTEXT_MODE="all changed files"
-elif [[ -n "$(git -C "$REPO" diff --cached --name-only)" ]]; then
+  git -C "$REPO" add -A
+fi
+
+if [[ -n "$(git -C "$REPO" diff --cached --name-only)" ]]; then
   CONTEXT_MODE="staged changes only"
 else
   CONTEXT_MODE="all changed files"
@@ -348,10 +350,6 @@ show_message() {
 }
 
 commit_message() {
-  if [[ "$ADD_ALL" -eq 1 ]]; then
-    git -C "$REPO" add -A
-  fi
-
   if [[ -z "$(git -C "$REPO" diff --cached --name-only)" ]]; then
     print -u2 -- "No staged changes to commit."
     print -u2 -- "Stage files with git add <file> and run quill again."

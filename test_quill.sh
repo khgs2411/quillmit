@@ -336,7 +336,7 @@ test_add_flag_stages_all_changes_before_commit() {
   [[ -z "$(git -C "$repo" status --short)" ]] || fail "expected repo to be clean after add commit"
 }
 
-test_add_flag_generates_context_from_all_changes() {
+test_add_flag_stages_before_generation() {
   local repo="$TMP_ROOT/add-context"
   git init -q "$repo"
   print -r -- "base" > "$repo/file.txt"
@@ -351,9 +351,27 @@ test_add_flag_generates_context_from_all_changes() {
 
   QUILL_STDIN_CAPTURE="$prompt_capture" PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --add --quit "$repo" >/dev/null
 
-  assert_contains "$(<"$prompt_capture")" "Context mode: all changed files"
-  assert_contains "$(<"$prompt_capture")" "Untracked files:"
+  assert_contains "$(<"$prompt_capture")" "Context mode: staged changes only"
+  assert_contains "$(<"$prompt_capture")" "Staged files:"
   assert_contains "$(<"$prompt_capture")" "other.txt"
+  assert_equals "$(git -C "$repo" diff --cached --name-only | sort | tr '\n' ' ')" "file.txt other.txt "
+  assert_equals "$(git -C "$repo" diff --name-only)" ""
+}
+
+test_add_flag_stages_before_provider_check() {
+  local repo="$TMP_ROOT/add-before-provider"
+  make_dirty_repo "$repo"
+  local output_file="$TMP_ROOT/add-before-provider-output.txt"
+
+  if PATH="/usr/bin:/bin" "$ROOT/quill" --add --quit "$repo" > "$output_file" 2>&1; then
+    fail "expected missing provider to fail"
+  fi
+
+  local output
+  output="$(<"$output_file")"
+  assert_contains "$output" "Codex CLI not found in PATH: codex"
+  assert_equals "$(git -C "$repo" diff --cached --name-only)" "file.txt"
+  assert_equals "$(git -C "$repo" diff --name-only)" ""
 }
 
 test_commit_alias_commits_with_generated_message() {
@@ -585,7 +603,8 @@ test_commits_with_generated_message
 test_commits_only_staged_changes_when_staged_changes_exist
 test_commit_mode_fails_cleanly_without_staged_changes
 test_add_flag_stages_all_changes_before_commit
-test_add_flag_generates_context_from_all_changes
+test_add_flag_stages_before_generation
+test_add_flag_stages_before_provider_check
 test_commit_alias_commits_with_generated_message
 test_copy_mode_copies_without_committing
 test_copy_mode_supports_linux_clipboard_fallback

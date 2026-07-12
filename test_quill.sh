@@ -37,6 +37,7 @@ write_fake_cli() {
 set -euo pipefail
 out=""
 stdin_capture="\${${name:u}_STDIN_CAPTURE:-\${QUILL_STDIN_CAPTURE:-}}"
+prompt_capture_dir="\${QUILL_PROMPT_CAPTURE_DIR:-}"
 args_capture="\${${name:u}_ARGS_CAPTURE:-}"
 if [[ -n "\$args_capture" ]]; then
   print -r -- "\$*" > "\$args_capture"
@@ -52,7 +53,10 @@ while [[ \$# -gt 0 ]]; do
       ;;
   esac
 done
-if [[ -n "\$stdin_capture" ]]; then
+if [[ -n "\$prompt_capture_dir" ]]; then
+  mkdir -p "\$prompt_capture_dir"
+  cat > "\$(mktemp "\$prompt_capture_dir/prompt.XXXXXX")"
+elif [[ -n "\$stdin_capture" ]]; then
   cat > "\$stdin_capture"
 else
   cat >/dev/null
@@ -106,6 +110,18 @@ make_dirty_repo() {
   local repo="$1"
   git init -q "$repo"
   print -r -- "hello" > "$repo/file.txt"
+}
+
+write_large_file() {
+  local path="$1"
+  local prefix="$2"
+  local lines="$3"
+  local index
+  {
+    for ((index = 1; index <= lines; index++)); do
+      print -r -- "$prefix line $index with enough repeated content to exercise prompt batching"
+    done
+  } > "$path"
 }
 
 make_dirty_repo_with_remote() {
@@ -265,6 +281,74 @@ CONFIG
 
   assert_contains "$output" "Generating commit message with Claude"
   assert_contains "$(<"$args_capture")" "--model claude-haiku-4-5-20251001"
+}
+
+test_large_context_uses_parallel_batches_and_synthesis() {
+  local repo="$TMP_ROOT/batched"
+  git init -q "$repo"
+  write_large_file "$repo/one.txt" "one" 220
+  write_large_file "$repo/two.txt" "two" 220
+  write_large_file "$repo/three.txt" "three" 220
+  git -C "$repo" add one.txt two.txt three.txt
+
+  local config="$TMP_ROOT/batched.config"
+  print -r -- "CODEX_MAX_PROMPT_BYTES=30000" > "$config"
+  local captures="$TMP_ROOT/batched-prompts"
+  local output
+  output="$(QUILL_PROMPT_CAPTURE_DIR="$captures" PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --config "$config" --quit "$repo")"
+
+  assert_contains "$output" "Large Git context detected"
+  assert_contains "$output" "parallel batches"
+  assert_contains "$output" "Add terminal commit message helper"
+  local summary_count
+  summary_count="$(grep -l "Summarize this portion" "$captures"/* | wc -l | tr -d ' ')"
+  [[ "$summary_count" -gt 1 ]] || fail "expected multiple summary invocations"
+  assert_equals "$(grep -l "Generate one git commit message from summaries" "$captures"/* | wc -l | tr -d ' ')" "1"
+}
+
+test_single_oversized_file_splits_across_batches() {
+  local repo="$TMP_ROOT/oversized-file"
+  git init -q "$repo"
+  write_large_file "$repo/large.txt" "oversized" 700
+  git -C "$repo" add large.txt
+
+  local config="$TMP_ROOT/oversized-file.config"
+  print -r -- "CODEX_MAX_PROMPT_BYTES=20000" > "$config"
+  local captures="$TMP_ROOT/oversized-file-prompts"
+  local output
+  output="$(QUILL_PROMPT_CAPTURE_DIR="$captures" PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --config "$config" --quit "$repo")"
+
+  assert_contains "$output" "Large Git context detected"
+  local summary_count
+  summary_count="$(grep -l "Summarize this portion" "$captures"/* | wc -l | tr -d ' ')"
+  [[ "$summary_count" -gt 1 ]] || fail "expected one oversized file to span multiple summary invocations"
+  grep -q "File: large.txt (part" "$captures"/* || fail "expected oversized file parts in summary prompts"
+}
+
+test_batch_budget_is_selected_per_provider() {
+  local repo="$TMP_ROOT/provider-budget"
+  git init -q "$repo"
+  write_large_file "$repo/large.txt" "provider" 500
+  git -C "$repo" add large.txt
+
+  local config="$TMP_ROOT/provider-budget.config"
+  cat > "$config" <<'CONFIG'
+CODEX_MAX_PROMPT_BYTES=100000
+CLAUDE_MAX_PROMPT_BYTES=20000
+GEMINI_MAX_PROMPT_BYTES=20000
+CONFIG
+
+  local claude_output
+  claude_output="$(PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --config "$config" --claude --quit "$repo")"
+  assert_contains "$claude_output" "Large Git context detected"
+
+  local gemini_output
+  gemini_output="$(PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --config "$config" --gemini --quit "$repo")"
+  assert_contains "$gemini_output" "Large Git context detected"
+
+  local codex_output
+  codex_output="$(PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --config "$config" --codex --quit "$repo")"
+  assert_not_contains "$codex_output" "Large Git context detected"
 }
 
 test_commits_with_generated_message() {
@@ -571,23 +655,40 @@ test_readme_documents_push_and_full_flags() {
   assert_contains "$readme" "Push failures leave the local commit in place."
 }
 
-test_install_links_quill_only() {
+test_install_copies_versioned_quill_package() {
   local install_bin="$TMP_ROOT/install-bin"
+  local install_root="$TMP_ROOT/install root"
   mkdir -p "$install_bin"
   ln -s "$ROOT/gcommit" "$install_bin/gcommit"
   ln -s "/Users/liadgoren/Repositories/quill/quill" "$install_bin/old-quill"
   ln -s "/Users/liadgoren/Repositories/quill/quill" "$install_bin/quill"
 
   local output
-  output="$("$ROOT/install" --bin-dir "$install_bin")"
+  output="$("$ROOT/install" --bin-dir "$install_bin" --install-root "$install_root")"
 
-  assert_contains "$output" "Installed quill"
+  local version
+  version="$(<"$ROOT/VERSION")"
+  local version_dir="$install_root/versions/$version"
+  assert_contains "$output" "Installed Quillmit $version"
+  assert_contains "$output" "Installed quill launcher"
   assert_contains "$output" "Removed legacy gcommit"
-  assert_contains "$output" "Removed stale quill symlink"
-  [[ -L "$install_bin/quill" ]] || fail "expected quill symlink"
-  [[ "$(readlink "$install_bin/quill")" == "$ROOT/quill" ]] || fail "unexpected quill symlink target"
+  assert_contains "$output" "Removed legacy quill symlink"
+  [[ -f "$install_bin/quill" && ! -L "$install_bin/quill" ]] || fail "expected a copied quill launcher"
+  [[ -x "$install_bin/quill" ]] || fail "expected executable quill launcher"
+  assert_equals "$("$install_bin/quill" --version)" "quill $version"
+  cmp -s "$ROOT/quill" "$version_dir/quill" || fail "installed quill differs from release source"
+  cmp -s "$ROOT/quill.config" "$version_dir/quill.config" || fail "installed config differs from release source"
+  cmp -s "$ROOT/VERSION" "$version_dir/VERSION" || fail "installed version differs from release source"
   [[ ! -e "$install_bin/gcommit" ]] || fail "did not expect gcommit symlink"
   [[ -L "$install_bin/old-quill" ]] || fail "unrelated legacy-looking symlink should remain when not named quill"
+
+  "$ROOT/install" --bin-dir "$install_bin" --install-root "$install_root" >/dev/null
+  print -r -- "changed" >> "$version_dir/quill"
+  local failure="$TMP_ROOT/install-version-mismatch.txt"
+  if "$ROOT/install" --bin-dir "$install_bin" --install-root "$install_root" > "$failure" 2>&1; then
+    fail "expected changed bytes for an installed version to be refused"
+  fi
+  assert_contains "$(<"$failure")" "Bump VERSION before installing changed release bytes"
 }
 
 test_clean_repo_reports_no_changes
@@ -599,6 +700,9 @@ test_staged_changes_use_staged_context_only
 test_claude_provider_uses_configured_model
 test_gemini_provider_uses_configured_model
 test_config_overrides_default_provider_and_models
+test_large_context_uses_parallel_batches_and_synthesis
+test_single_oversized_file_splits_across_batches
+test_batch_budget_is_selected_per_provider
 test_commits_with_generated_message
 test_commits_only_staged_changes_when_staged_changes_exist
 test_commit_mode_fails_cleanly_without_staged_changes
@@ -618,6 +722,6 @@ test_interactive_push_does_not_push_after_quit_choice
 test_push_rejects_non_commit_modes_before_generation
 test_full_rejects_non_commit_modes_regardless_of_order
 test_readme_documents_push_and_full_flags
-test_install_links_quill_only
+test_install_copies_versioned_quill_package
 
 print -- "All tests passed"

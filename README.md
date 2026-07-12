@@ -76,9 +76,20 @@ cd quillmit
 ./install
 ```
 
-This links `quill` into `~/.local/bin`.
+The installer copies the release into
+`~/.local/share/quillmit/versions/<version>/` and writes an owned launcher at
+`~/.local/bin/quill`. It does not create a symlink or keep the command coupled
+to the checkout. Re-running the installer repairs the launcher; installing
+different bytes under an existing version is refused so releases remain
+immutable.
 
 Make sure `~/.local/bin` is on your `PATH`.
+
+Confirm the installed release with:
+
+```sh
+quill --version
+```
 
 ## Usage
 
@@ -93,6 +104,12 @@ previews it, prepares `.git/COMMIT_EDITMSG`, then asks what to do next.
 If files are staged, Quillmit generates the message from staged changes only.
 If nothing is staged, it generates from the changed working tree.
 Commit actions only commit staged changes by default.
+
+When the Git context exceeds the selected provider's configured prompt budget,
+Quillmit groups complete file diffs into bounded batches, summarizes those
+batches in parallel, and makes one final provider call to synthesize the commit
+message. A single file larger than a batch is split at diff-hunk boundaries,
+with a byte-bounded fallback for an individual oversized hunk.
 
 By default it uses Codex. Other providers:
 
@@ -168,7 +185,15 @@ DEFAULT_PROVIDER=codex
 CODEX_MODEL=gpt-5.3-codex-spark
 CLAUDE_MODEL=haiku
 GEMINI_MODEL=gemini-3-flash-preview
+
+CODEX_MAX_PROMPT_BYTES=160000
+CLAUDE_MAX_PROMPT_BYTES=160000
+GEMINI_MAX_PROMPT_BYTES=160000
 ```
+
+The byte budgets are conservative input limits that reserve context for
+provider instructions and output. They can be tuned independently when using a
+model with a different context window.
 
 Use a different config file:
 
@@ -205,5 +230,5 @@ MIT. See [LICENSE](LICENSE).
 If you are developing Quillmit locally:
 
 ```sh
-./install --bin-dir /path/on/PATH
+./install --bin-dir /path/on/PATH --install-root /path/for/versioned/packages
 ```

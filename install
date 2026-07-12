@@ -3,12 +3,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BIN_DIR="$HOME/.local/bin"
+INSTALL_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/quillmit"
+VERSION="$(tr -d '[:space:]' < "$SCRIPT_DIR/VERSION")"
 
 usage() {
   cat <<'TEXT'
-Usage: install [--bin-dir dir]
+Usage: install [--bin-dir dir] [--install-root dir]
 
-Install Quillmit by linking the quill command into a directory on PATH.
+Install the current Quillmit version as a copied, versioned package.
 TEXT
 }
 
@@ -16,6 +18,10 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --bin-dir)
       BIN_DIR="${2:-}"
+      shift 2
+      ;;
+    --install-root)
+      INSTALL_ROOT="${2:-}"
       shift 2
       ;;
     -h|--help)
@@ -34,26 +40,84 @@ if [[ -z "$BIN_DIR" ]]; then
   print -u2 -- "--bin-dir cannot be empty"
   exit 1
 fi
+if [[ -z "$INSTALL_ROOT" ]]; then
+  print -u2 -- "--install-root cannot be empty"
+  exit 1
+fi
+if [[ -z "$VERSION" || "$VERSION" == *[!0-9A-Za-z._-]* ]]; then
+  print -u2 -- "Invalid VERSION: $VERSION"
+  exit 1
+fi
 
-mkdir -p "$BIN_DIR"
+for source_file in quill quill.config VERSION; do
+  if [[ ! -f "$SCRIPT_DIR/$source_file" ]]; then
+    print -u2 -- "Missing install source: $SCRIPT_DIR/$source_file"
+    exit 1
+  fi
+done
+
+VERSION_DIR="$INSTALL_ROOT/versions/$VERSION"
+LAUNCHER_PATH="$BIN_DIR/quill"
+STAGING_DIR="$INSTALL_ROOT/.install-$VERSION-$$"
+trap 'rm -rf "$STAGING_DIR"' EXIT
+
+mkdir -p "$BIN_DIR" "$INSTALL_ROOT/versions"
+
+if [[ -e "$VERSION_DIR" ]]; then
+  if [[ ! -f "$VERSION_DIR/quill" || ! -f "$VERSION_DIR/quill.config" || ! -f "$VERSION_DIR/VERSION" ]] || \
+     ! cmp -s "$SCRIPT_DIR/quill" "$VERSION_DIR/quill" || \
+     ! cmp -s "$SCRIPT_DIR/quill.config" "$VERSION_DIR/quill.config" || \
+     ! cmp -s "$SCRIPT_DIR/VERSION" "$VERSION_DIR/VERSION"; then
+    print -u2 -- "Quillmit $VERSION is already installed with different contents. Bump VERSION before installing changed release bytes."
+    exit 1
+  fi
+else
+  mkdir "$STAGING_DIR"
+  cp "$SCRIPT_DIR/quill" "$STAGING_DIR/quill"
+  cp "$SCRIPT_DIR/quill.config" "$STAGING_DIR/quill.config"
+  cp "$SCRIPT_DIR/VERSION" "$STAGING_DIR/VERSION"
+  chmod 755 "$STAGING_DIR/quill"
+  mv "$STAGING_DIR" "$VERSION_DIR"
+fi
 
 if [[ -L "$BIN_DIR/gcommit" ]]; then
   rm "$BIN_DIR/gcommit"
   print -- "Removed legacy gcommit -> $BIN_DIR/gcommit"
 fi
 
-if [[ -L "$BIN_DIR/quill" ]]; then
-  current_target="$(readlink "$BIN_DIR/quill")"
+if [[ -L "$LAUNCHER_PATH" ]]; then
+  current_target="$(readlink "$LAUNCHER_PATH")"
   case "$current_target" in
-    "$SCRIPT_DIR/quill")
+    "$SCRIPT_DIR/quill"|*"/Repositories/codex-gcommit/"*|*"/Repositories/quill/"*|*"/Repositories/quillmit/"*)
+      rm "$LAUNCHER_PATH"
+      print -- "Removed legacy quill symlink -> $current_target"
       ;;
-    *"/Repositories/codex-gcommit/"*|*"/Repositories/quill/"*)
-      rm "$BIN_DIR/quill"
-      print -- "Removed stale quill symlink -> $current_target"
+    *)
+      print -u2 -- "Refusing to replace unowned quill symlink: $LAUNCHER_PATH -> $current_target"
+      exit 1
       ;;
   esac
+elif [[ -e "$LAUNCHER_PATH" ]] && ! grep -q '^# Quillmit installed launcher$' "$LAUNCHER_PATH"; then
+  print -u2 -- "Refusing to replace unowned command: $LAUNCHER_PATH"
+  exit 1
 fi
 
-ln -sfn "$SCRIPT_DIR/quill" "$BIN_DIR/quill"
+launcher_tmp="$LAUNCHER_PATH.tmp-$$"
+target_quoted="$(printf '%q' "$VERSION_DIR/quill")"
+{
+  print -r -- '#!/bin/zsh'
+  print -r -- '# Quillmit installed launcher'
+  print -r -- "# Version: $VERSION"
+  print -r -- 'set -euo pipefail'
+  print -r -- "exec $target_quoted \"\$@\""
+} > "$launcher_tmp"
+chmod 755 "$launcher_tmp"
+mv "$launcher_tmp" "$LAUNCHER_PATH"
 
-print -- "Installed quill -> $SCRIPT_DIR/quill"
+case ":$PATH:" in
+  *":$BIN_DIR:"*) ;;
+  *) print -u2 -- "$BIN_DIR is not on PATH. Add it to your shell PATH before invoking quill globally." ;;
+esac
+
+print -- "Installed Quillmit $VERSION -> $VERSION_DIR"
+print -- "Installed quill launcher -> $LAUNCHER_PATH"

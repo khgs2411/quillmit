@@ -2,10 +2,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+QUILLMIT_VERSION="dev"
+if [[ -f "$SCRIPT_DIR/VERSION" ]]; then
+  QUILLMIT_VERSION="$(tr -d '[:space:]' < "$SCRIPT_DIR/VERSION")"
+fi
 
 usage() {
   cat <<'TEXT'
-Usage: quill [--codex|--claude|--gemini|--provider name] [--config file] [--prepare|--commit|--copy|--quit|--add|--push|--full|--verbose] [repo]
+Usage: quill [--codex|--claude|--gemini|--provider name] [--config file] [--prepare|--commit|--copy|--quit|--add|--push|--full|--verbose|--version] [repo]
 
 Generate a medium-sized Git commit message, prepare it, then choose an action.
 TEXT
@@ -25,6 +29,9 @@ DEFAULT_PROVIDER=codex
 CODEX_MODEL=gpt-5.3-codex-spark
 CLAUDE_MODEL=haiku
 GEMINI_MODEL=gemini-3-flash-preview
+CODEX_MAX_PROMPT_BYTES=160000
+CLAUDE_MAX_PROMPT_BYTES=160000
+GEMINI_MAX_PROMPT_BYTES=160000
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -85,6 +92,10 @@ while [[ $# -gt 0 ]]; do
     --config)
       CONFIG_FILE="${2:-}"
       shift 2
+      ;;
+    --version)
+      print -- "quill $QUILLMIT_VERSION"
+      exit 0
       ;;
     -h|--help)
       usage
@@ -147,6 +158,14 @@ provider_model() {
   esac
 }
 
+provider_max_prompt_bytes() {
+  case "$PROVIDER" in
+    codex) print -- "$CODEX_MAX_PROMPT_BYTES" ;;
+    claude) print -- "$CLAUDE_MAX_PROMPT_BYTES" ;;
+    gemini) print -- "$GEMINI_MAX_PROMPT_BYTES" ;;
+  esac
+}
+
 if [[ -z "$REPO_INPUT" ]]; then
   REPO_INPUT="$PWD"
 fi
@@ -178,7 +197,13 @@ fi
 
 CLI="$(provider_command)"
 MODEL="$(provider_model)"
+MAX_PROMPT_BYTES="$(provider_max_prompt_bytes)"
 LABEL="$(provider_label)"
+
+if [[ ! "$MAX_PROMPT_BYTES" =~ '^[0-9]+$' || "$MAX_PROMPT_BYTES" -lt 20000 ]]; then
+  print -u2 -- "Invalid ${PROVIDER:u}_MAX_PROMPT_BYTES: $MAX_PROMPT_BYTES (expected an integer of at least 20000)"
+  exit 1
+fi
 
 if ! command -v "$CLI" >/dev/null 2>&1; then
   print -u2 -- "$LABEL CLI not found in PATH: $CLI"
@@ -198,6 +223,56 @@ if ! { mkdir -p "$LOG_DIR" && : > "$LOG_FILE"; } 2>/dev/null; then
   : > "$LOG_FILE"
 fi
 SPINNER_PID=""
+BATCH_COUNT=0
+BATCH_CONTENT_BYTES=$((MAX_PROMPT_BYTES - 12000))
+
+write_message_requirements() {
+  print -- "Return only the commit message text."
+  print -- ""
+  print -- "Requirements:"
+  print -- "- Use a clear, normal title by default."
+  print -- "- Do not use conventional commit prefixes such as feat:, feat(scope):, fix:, chore:, docs:, refactor:, or test:."
+  print -- "- Bad: feat(pipeline): add telemetry"
+  print -- "- Bad: chore: update release scripts"
+  print -- "- Good: Add run-profile telemetry for compile/update orchestration"
+  print -- "- Good, only when the type is obvious: Feature: Add run-profile telemetry for compile/update orchestration"
+  print -- "- Good, only for an obvious defect repair: Bug: Fix route-health status reporting"
+  print -- "- Make it medium length: one title line, a blank line, then 2-4 concise body lines or sentences."
+  print -- "- Mention the actual intent of the diff, not a mechanical file list."
+  print -- "- Do not wrap the answer in Markdown or quotes."
+}
+
+write_git_overview() {
+  print -- "Repository:"
+  print -- "$REPO"
+  print -- ""
+  print -- "Context mode: $CONTEXT_MODE"
+  print -- ""
+  if [[ "$CONTEXT_MODE" == "staged changes only" ]]; then
+    print -- "Staged files:"
+    git -C "$REPO" diff --cached --name-status
+    print -- ""
+    print -- "Staged diff --stat:"
+    git -C "$REPO" diff --cached --stat
+  else
+    print -- "Git status --short:"
+    git -C "$REPO" status --short
+    print -- ""
+    print -- "Unstaged diff --stat:"
+    git -C "$REPO" diff --stat
+    print -- ""
+    print -- "Untracked files:"
+    git -C "$REPO" ls-files --others --exclude-standard
+  fi
+}
+
+write_diff() {
+  if [[ "$CONTEXT_MODE" == "staged changes only" ]]; then
+    git -C "$REPO" diff --cached --no-ext-diff "$@"
+  else
+    git -C "$REPO" diff --no-ext-diff "$@"
+  fi
+}
 
 write_git_context() {
   {
@@ -205,48 +280,159 @@ write_git_context() {
     print -- ""
     print -- "Do not inspect the repository yourself. Do not run commands. Do not modify files. Do not stage files. Do not commit."
     print -- ""
-    print -- "Return only the commit message text."
+    write_message_requirements
     print -- ""
-    print -- "Requirements:"
-    print -- "- Use a clear, normal title by default."
-    print -- "- Do not use conventional commit prefixes such as feat:, feat(scope):, fix:, chore:, docs:, refactor:, or test:."
-    print -- "- Bad: feat(pipeline): add telemetry"
-    print -- "- Bad: chore: update release scripts"
-    print -- "- Good: Add run-profile telemetry for compile/update orchestration"
-    print -- "- Good, only when the type is obvious: Feature: Add run-profile telemetry for compile/update orchestration"
-    print -- "- Good, only for an obvious defect repair: Bug: Fix route-health status reporting"
-    print -- "- Make it medium length: one title line, a blank line, then 2-4 concise body lines or sentences."
-    print -- "- Mention the actual intent of the diff, not a mechanical file list."
-    print -- "- Do not wrap the answer in Markdown or quotes."
-    print -- ""
-    print -- "Repository:"
-    print -- "$REPO"
-    print -- ""
-    print -- "Context mode: $CONTEXT_MODE"
+    write_git_overview
     print -- ""
     if [[ "$CONTEXT_MODE" == "staged changes only" ]]; then
-      print -- "Staged files:"
-      git -C "$REPO" diff --cached --name-status
-      print -- ""
-      print -- "Staged diff --stat:"
-      git -C "$REPO" diff --cached --stat
-      print -- ""
       print -- "Staged diff:"
-      git -C "$REPO" diff --cached --no-ext-diff
+      write_diff
     else
-      print -- "Git status --short:"
-      git -C "$REPO" status --short
-      print -- ""
-      print -- "Unstaged diff --stat:"
-      git -C "$REPO" diff --stat
-      print -- ""
       print -- "Unstaged diff:"
-      git -C "$REPO" diff --no-ext-diff
-      print -- ""
-      print -- "Untracked files:"
-      git -C "$REPO" ls-files --others --exclude-standard
+      write_diff
     fi
   } > "$PROMPT_FILE"
+}
+
+new_batch() {
+  BATCH_COUNT=$((BATCH_COUNT + 1))
+  CURRENT_BATCH_FILE="$TMP_DIR/batch-$BATCH_COUNT.diff"
+  CURRENT_BATCH_BYTES=0
+  : > "$CURRENT_BATCH_FILE"
+}
+
+append_batch_unit() {
+  local unit_file="$1"
+  local label="$2"
+  local unit_bytes
+  unit_bytes="$(wc -c < "$unit_file" | tr -d ' ')"
+
+  if [[ "$CURRENT_BATCH_BYTES" -gt 0 && $((CURRENT_BATCH_BYTES + unit_bytes + 80)) -gt "$BATCH_CONTENT_BYTES" ]]; then
+    new_batch
+  fi
+
+  print -- "" >> "$CURRENT_BATCH_FILE"
+  print -- "--- $label ---" >> "$CURRENT_BATCH_FILE"
+  cat "$unit_file" >> "$CURRENT_BATCH_FILE"
+  CURRENT_BATCH_BYTES="$(wc -c < "$CURRENT_BATCH_FILE" | tr -d ' ')"
+}
+
+append_oversized_diff() {
+  local diff_file="$1"
+  local file="$2"
+  local split_dir="$TMP_DIR/split-$BATCH_COUNT-${RANDOM}"
+  mkdir -p "$split_dir"
+
+  LC_ALL=C awk -v dir="$split_dir" '
+    function output() { return sprintf("%s/hunk-%06d.diff", dir, part) }
+    /^@@ / { if (started) close(output()); part++; started=1 }
+    { print >> output() }
+  ' "$diff_file"
+
+  local header="$split_dir/hunk-000000.diff"
+  local header_bytes
+  header_bytes="$(wc -c < "$header" | tr -d ' ')"
+  local piece_bytes=$((BATCH_CONTENT_BYTES - header_bytes - 200))
+  if [[ "$piece_bytes" -lt 1000 ]]; then
+    piece_bytes=$((BATCH_CONTENT_BYTES / 2))
+  fi
+
+  local part=0
+  local found_hunk=0
+  local hunk
+  for hunk in "$split_dir"/hunk-*.diff; do
+    [[ -f "$hunk" ]] || continue
+    [[ "$hunk" == "$header" ]] && continue
+    found_hunk=1
+    local combined="$split_dir/combined-${part}.diff"
+    cat "$header" "$hunk" > "$combined"
+    local combined_bytes
+    combined_bytes="$(wc -c < "$combined" | tr -d ' ')"
+    if [[ "$combined_bytes" -le "$BATCH_CONTENT_BYTES" ]]; then
+      part=$((part + 1))
+      append_batch_unit "$combined" "File: $file (part $part)"
+      continue
+    fi
+
+    local piece_prefix="$split_dir/piece-${part}-"
+    split -b "$piece_bytes" -a 6 "$hunk" "$piece_prefix"
+    local piece
+    for piece in "$piece_prefix"*; do
+      part=$((part + 1))
+      local combined_piece="$split_dir/combined-piece-${part}.diff"
+      cat "$header" "$piece" > "$combined_piece"
+      append_batch_unit "$combined_piece" "File: $file (part $part)"
+    done
+  done
+
+  if [[ "$found_hunk" -eq 0 ]]; then
+    local piece_prefix="$split_dir/header-piece-"
+    split -b "$BATCH_CONTENT_BYTES" -a 6 "$header" "$piece_prefix"
+    local piece
+    for piece in "$piece_prefix"*; do
+      part=$((part + 1))
+      append_batch_unit "$piece" "File: $file (part $part)"
+    done
+  fi
+}
+
+build_batches() {
+  BATCH_COUNT=0
+  new_batch
+
+  local file_index=0
+  local file
+  while IFS= read -r -d '' file; do
+    file_index=$((file_index + 1))
+    local diff_file="$TMP_DIR/file-$file_index.diff"
+    write_diff -- "$file" > "$diff_file"
+    local diff_bytes
+    diff_bytes="$(wc -c < "$diff_file" | tr -d ' ')"
+    if [[ "$diff_bytes" -gt "$BATCH_CONTENT_BYTES" ]]; then
+      append_oversized_diff "$diff_file" "$file"
+    else
+      append_batch_unit "$diff_file" "File: $file"
+    fi
+  done < <(if [[ "$CONTEXT_MODE" == "staged changes only" ]]; then git -C "$REPO" diff --cached --name-only -z; else git -C "$REPO" diff --name-only -z; fi)
+}
+
+write_batch_prompts() {
+  local batch
+  for ((batch = 1; batch <= BATCH_COUNT; batch++)); do
+    {
+      print -- "Summarize this portion of a larger Git change for a final commit-message writer."
+      print -- "Do not inspect the repository, run commands, modify files, stage files, or commit."
+      print -- "Identify intent and externally meaningful behavior across files; do not produce a commit message."
+      print -- "Return at most six concise bullets covering intent, behavior/contracts, tests, documentation, and material risks."
+      print -- ""
+      print -- "Repository: $REPO"
+      print -- "Context mode: $CONTEXT_MODE"
+      print -- "Batch: $batch of $BATCH_COUNT"
+      print -- ""
+      print -- "Diff portion:"
+      cat "$TMP_DIR/batch-$batch.diff"
+    } > "$TMP_DIR/batch-$batch.prompt"
+  done
+}
+
+write_synthesis_prompt() {
+  {
+    print -- "Generate one git commit message from summaries of a large Git diff."
+    print -- "Do not inspect the repository yourself. Do not run commands. Do not modify files. Do not stage files. Do not commit."
+    print -- "Synthesize the overall intent; summaries may overlap, so do not concatenate or mechanically enumerate them."
+    print -- ""
+    write_message_requirements
+    print -- ""
+    write_git_overview
+    print -- ""
+    print -- "Batch summaries:"
+    local batch
+    for ((batch = 1; batch <= BATCH_COUNT; batch++)); do
+      print -- ""
+      print -- "Summary $batch of $BATCH_COUNT:"
+      cat "$TMP_DIR/batch-$batch.summary"
+    done
+  } > "$TMP_DIR/synthesis.prompt"
 }
 
 clean_message() {
@@ -294,6 +480,8 @@ stop_progress() {
 }
 
 run_provider() {
+  local prompt_file="$1"
+  local message_file="$2"
   case "$PROVIDER" in
     codex)
       codex exec \
@@ -301,8 +489,8 @@ run_provider() {
         --cd "$REPO" \
         --sandbox read-only \
         --ephemeral \
-        -o "$MESSAGE_FILE" \
-        - < "$PROMPT_FILE"
+        -o "$message_file" \
+        - < "$prompt_file"
       ;;
     claude)
       claude \
@@ -310,26 +498,77 @@ run_provider() {
         -p \
         --model "$MODEL" \
         --output-format text \
-        "Use stdin as the full task. Return only the commit message." \
-        < "$PROMPT_FILE" > "$MESSAGE_FILE"
+        "Use stdin as the full task. Follow its output instructions exactly." \
+        < "$prompt_file" > "$message_file"
       ;;
     gemini)
       gemini \
-        -p "Use stdin as the full task. Return only the commit message." \
+        -p "Use stdin as the full task. Follow its output instructions exactly." \
         --model "$MODEL" \
-        < "$PROMPT_FILE" > "$MESSAGE_FILE"
+        < "$prompt_file" > "$message_file"
       ;;
   esac
+}
+
+run_batched_provider() {
+  local pids=()
+  local batch
+  for ((batch = 1; batch <= BATCH_COUNT; batch++)); do
+    run_provider "$TMP_DIR/batch-$batch.prompt" "$TMP_DIR/batch-$batch.summary" > "$TMP_DIR/batch-$batch.log" 2>&1 &
+    pids+=("$!")
+  done
+
+  local failed=0
+  local index=1
+  local pid
+  for pid in "${pids[@]}"; do
+    if ! wait "$pid"; then
+      failed=1
+    fi
+    print -- "Batch $index provider log:"
+    cat "$TMP_DIR/batch-$index.log"
+    index=$((index + 1))
+  done
+  [[ "$failed" -eq 0 ]] || return 1
+
+  write_synthesis_prompt
+  local synthesis_bytes
+  synthesis_bytes="$(wc -c < "$TMP_DIR/synthesis.prompt" | tr -d ' ')"
+  if [[ "$synthesis_bytes" -gt "$MAX_PROMPT_BYTES" ]]; then
+    print -u2 -- "Synthesis prompt exceeds ${PROVIDER:u}_MAX_PROMPT_BYTES ($synthesis_bytes > $MAX_PROMPT_BYTES)."
+    return 1
+  fi
+  run_provider "$TMP_DIR/synthesis.prompt" "$MESSAGE_FILE"
 }
 
 generate_message() {
   write_git_context
 
+  local prompt_bytes
+  prompt_bytes="$(wc -c < "$PROMPT_FILE" | tr -d ' ')"
+  local batched=0
+  if [[ "$prompt_bytes" -gt "$MAX_PROMPT_BYTES" ]]; then
+    build_batches
+    write_batch_prompts
+    batched=1
+    print -- "Large Git context detected ($prompt_bytes bytes); summarizing in $BATCH_COUNT parallel batches."
+  fi
+
   if [[ "$VERBOSE" -eq 1 ]]; then
-    run_provider
+    if [[ "$batched" -eq 1 ]]; then
+      run_batched_provider
+    else
+      run_provider "$PROMPT_FILE" "$MESSAGE_FILE"
+    fi
   else
     start_progress
-    if ! run_provider > "$LOG_FILE" 2>&1; then
+    if ! {
+      if [[ "$batched" -eq 1 ]]; then
+        run_batched_provider
+      else
+        run_provider "$PROMPT_FILE" "$MESSAGE_FILE"
+      fi
+    } > "$LOG_FILE" 2>&1; then
       stop_progress 0
       print -u2 -- "$LABEL failed. Log: $LOG_FILE"
       return 1

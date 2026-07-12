@@ -114,6 +114,25 @@ target_quoted="$(printf '%q' "$VERSION_DIR/quill")"
 chmod 755 "$launcher_tmp"
 mv "$launcher_tmp" "$LAUNCHER_PATH"
 
+for installed_dir in "$INSTALL_ROOT/versions"/*(N); do
+  [[ "$installed_dir" == "$VERSION_DIR" ]] && continue
+
+  if [[ -L "$installed_dir" || ! -d "$installed_dir" || \
+        ! -f "$installed_dir/quill" || ! -f "$installed_dir/quill.config" || ! -f "$installed_dir/VERSION" ]]; then
+    print -u2 -- "Preserved unrecognized install artifact: $installed_dir"
+    continue
+  fi
+
+  installed_version="$(tr -d '[:space:]' < "$installed_dir/VERSION")"
+  if [[ "$installed_version" != "${installed_dir:t}" || "$installed_version" == *[!0-9A-Za-z._-]* ]]; then
+    print -u2 -- "Preserved unrecognized install artifact: $installed_dir"
+    continue
+  fi
+
+  rm -rf -- "$installed_dir"
+  print -- "Removed Quillmit $installed_version -> $installed_dir"
+done
+
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
   *) print -u2 -- "$BIN_DIR is not on PATH. Add it to your shell PATH before invoking quill globally." ;;

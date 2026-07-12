@@ -81,7 +81,9 @@ The installer copies the release into
 `~/.local/bin/quill`. It does not create a symlink or keep the command coupled
 to the checkout. Re-running the installer repairs the launcher; installing
 different bytes under an existing version is refused so releases remain
-immutable.
+immutable. After the launcher switches successfully, the installer removes all
+older recognized Quillmit version directories. Unrecognized content in a
+custom install root is preserved with a warning rather than deleted.
 
 Make sure `~/.local/bin` is on your `PATH`.
 

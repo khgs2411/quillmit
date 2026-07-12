@@ -222,8 +222,12 @@ if ! { mkdir -p "$LOG_DIR" && : > "$LOG_FILE"; } 2>/dev/null; then
   LOG_FILE="$LOG_DIR/last.log"
   : > "$LOG_FILE"
 fi
-SPINNER_PID=""
+PROGRESS_PID=""
+PROGRESS_FILE="$TMP_DIR/progress"
+PROGRESS_TOTAL=1
+PROGRESS_WIDTH=24
 BATCH_COUNT=0
+BATCH_FILE_COUNT=0
 BATCH_CONTENT_BYTES=$((MAX_PROMPT_BYTES - 12000))
 
 write_message_requirements() {
@@ -321,6 +325,17 @@ append_oversized_diff() {
   local diff_file="$1"
   local file="$2"
   local split_dir="$TMP_DIR/split-$BATCH_COUNT-${RANDOM}"
+  local header
+  local header_bytes
+  local piece_bytes
+  local part=0
+  local found_hunk=0
+  local hunk
+  local combined
+  local combined_bytes
+  local piece_prefix
+  local piece
+  local combined_piece
   mkdir -p "$split_dir"
 
   LC_ALL=C awk -v dir="$split_dir" '
@@ -329,24 +344,19 @@ append_oversized_diff() {
     { print >> output() }
   ' "$diff_file"
 
-  local header="$split_dir/hunk-000000.diff"
-  local header_bytes
+  header="$split_dir/hunk-000000.diff"
   header_bytes="$(wc -c < "$header" | tr -d ' ')"
-  local piece_bytes=$((BATCH_CONTENT_BYTES - header_bytes - 200))
+  piece_bytes=$((BATCH_CONTENT_BYTES - header_bytes - 200))
   if [[ "$piece_bytes" -lt 1000 ]]; then
     piece_bytes=$((BATCH_CONTENT_BYTES / 2))
   fi
 
-  local part=0
-  local found_hunk=0
-  local hunk
   for hunk in "$split_dir"/hunk-*.diff; do
     [[ -f "$hunk" ]] || continue
     [[ "$hunk" == "$header" ]] && continue
     found_hunk=1
-    local combined="$split_dir/combined-${part}.diff"
+    combined="$split_dir/combined-${part}.diff"
     cat "$header" "$hunk" > "$combined"
-    local combined_bytes
     combined_bytes="$(wc -c < "$combined" | tr -d ' ')"
     if [[ "$combined_bytes" -le "$BATCH_CONTENT_BYTES" ]]; then
       part=$((part + 1))
@@ -354,21 +364,19 @@ append_oversized_diff() {
       continue
     fi
 
-    local piece_prefix="$split_dir/piece-${part}-"
+    piece_prefix="$split_dir/piece-${part}-"
     split -b "$piece_bytes" -a 6 "$hunk" "$piece_prefix"
-    local piece
     for piece in "$piece_prefix"*; do
       part=$((part + 1))
-      local combined_piece="$split_dir/combined-piece-${part}.diff"
+      combined_piece="$split_dir/combined-piece-${part}.diff"
       cat "$header" "$piece" > "$combined_piece"
       append_batch_unit "$combined_piece" "File: $file (part $part)"
     done
   done
 
   if [[ "$found_hunk" -eq 0 ]]; then
-    local piece_prefix="$split_dir/header-piece-"
+    piece_prefix="$split_dir/header-piece-"
     split -b "$BATCH_CONTENT_BYTES" -a 6 "$header" "$piece_prefix"
-    local piece
     for piece in "$piece_prefix"*; do
       part=$((part + 1))
       append_batch_unit "$piece" "File: $file (part $part)"
@@ -378,15 +386,17 @@ append_oversized_diff() {
 
 build_batches() {
   BATCH_COUNT=0
+  BATCH_FILE_COUNT=0
   new_batch
 
   local file_index=0
   local file
+  local diff_file
+  local diff_bytes
   while IFS= read -r -d '' file; do
     file_index=$((file_index + 1))
-    local diff_file="$TMP_DIR/file-$file_index.diff"
+    diff_file="$TMP_DIR/file-$file_index.diff"
     write_diff -- "$file" > "$diff_file"
-    local diff_bytes
     diff_bytes="$(wc -c < "$diff_file" | tr -d ' ')"
     if [[ "$diff_bytes" -gt "$BATCH_CONTENT_BYTES" ]]; then
       append_oversized_diff "$diff_file" "$file"
@@ -394,6 +404,7 @@ build_batches() {
       append_batch_unit "$diff_file" "File: $file"
     fi
   done < <(if [[ "$CONTEXT_MODE" == "staged changes only" ]]; then git -C "$REPO" diff --cached --name-only -z; else git -C "$REPO" diff --name-only -z; fi)
+  BATCH_FILE_COUNT="$file_index"
 }
 
 write_batch_prompts() {
@@ -440,22 +451,49 @@ clean_message() {
   mv "$MESSAGE_FILE.cleaned" "$MESSAGE_FILE"
 }
 
+set_progress() {
+  local completed="$1"
+  print -r -- "$completed" > "$PROGRESS_FILE"
+}
+
 start_progress() {
   if [[ "$VERBOSE" -eq 1 ]]; then
     return
   fi
 
   if [[ -t 1 ]]; then
+    set_progress 0
     (
-      frames=("|" "/" "-" "\\")
-      i=1
+      local tick=0
+      local completed
+      local filled
+      local remaining
+      local marker
+      local bar
+      local position
       while true; do
-        print -n -- $'\r'"Generating commit message with $LABEL ${frames[$i]} "
-        i=$((i % ${#frames[@]} + 1))
+        completed=0
+        [[ -f "$PROGRESS_FILE" ]] && completed="$(<"$PROGRESS_FILE")"
+        filled=$((completed * PROGRESS_WIDTH / PROGRESS_TOTAL))
+        remaining=$((PROGRESS_WIDTH - filled))
+        marker=0
+        [[ "$remaining" -gt 0 ]] && marker=$((filled + tick % remaining + 1))
+        bar=""
+        for ((position = 1; position <= PROGRESS_WIDTH; position++)); do
+          if [[ "$position" -le "$filled" ]]; then
+            bar+="="
+          elif [[ "$position" -eq "$marker" ]]; then
+            bar+=">"
+          else
+            bar+="-"
+          fi
+        done
+        print -n -- $'\r'"Generating with $LABEL [$bar] $completed/$PROGRESS_TOTAL"
+        tick=$((tick + 1))
         sleep 0.12
       done
     ) &
-    SPINNER_PID="$!"
+    PROGRESS_PID="$!"
   else
     print -- "Generating commit message with $LABEL..."
   fi
@@ -467,14 +505,17 @@ stop_progress() {
     return
   fi
 
-  if [[ -n "$SPINNER_PID" ]]; then
-    kill "$SPINNER_PID" >/dev/null 2>&1 || true
-    wait "$SPINNER_PID" 2>/dev/null || true
-    SPINNER_PID=""
+  if [[ -n "$PROGRESS_PID" ]]; then
+    kill "$PROGRESS_PID" >/dev/null 2>&1 || true
+    wait "$PROGRESS_PID" 2>/dev/null || true
+    PROGRESS_PID=""
     if [[ "$ok" -eq 1 ]]; then
-      print -- $'\r'"Generated commit message with $LABEL.      "
+      local bar=""
+      local position
+      for ((position = 1; position <= PROGRESS_WIDTH; position++)); do bar+="="; done
+      print -- $'\r'"Generated with $LABEL [$bar] done"
     else
-      print -- $'\r'"$LABEL failed while generating message.    "
+      print -- $'\r'"$LABEL failed while generating the commit message."
     fi
   fi
 }
@@ -525,6 +566,7 @@ run_batched_provider() {
     if ! wait "$pid"; then
       failed=1
     fi
+    set_progress "$index"
     print -- "Batch $index provider log:"
     cat "$TMP_DIR/batch-$index.log"
     index=$((index + 1))
@@ -539,6 +581,7 @@ run_batched_provider() {
     return 1
   fi
   run_provider "$TMP_DIR/synthesis.prompt" "$MESSAGE_FILE"
+  set_progress "$PROGRESS_TOTAL"
 }
 
 generate_message() {
@@ -547,11 +590,16 @@ generate_message() {
   local prompt_bytes
   prompt_bytes="$(wc -c < "$PROMPT_FILE" | tr -d ' ')"
   local batched=0
+  local prompt_kib
+  local file_word
   if [[ "$prompt_bytes" -gt "$MAX_PROMPT_BYTES" ]]; then
     build_batches
     write_batch_prompts
     batched=1
-    print -- "Large Git context detected ($prompt_bytes bytes); summarizing in $BATCH_COUNT parallel batches."
+    prompt_kib=$(((prompt_bytes + 1023) / 1024))
+    file_word="files"
+    [[ "$BATCH_FILE_COUNT" -eq 1 ]] && file_word="file"
+    print -- "Large change detected: $BATCH_FILE_COUNT $file_word, ${prompt_kib} KiB; analyzing in $BATCH_COUNT parallel batches."
   fi
 
   if [[ "$VERBOSE" -eq 1 ]]; then
@@ -561,12 +609,18 @@ generate_message() {
       run_provider "$PROMPT_FILE" "$MESSAGE_FILE"
     fi
   else
+    if [[ "$batched" -eq 1 ]]; then
+      PROGRESS_TOTAL=$((BATCH_COUNT + 1))
+    else
+      PROGRESS_TOTAL=1
+    fi
     start_progress
     if ! {
       if [[ "$batched" -eq 1 ]]; then
         run_batched_provider
       else
         run_provider "$PROMPT_FILE" "$MESSAGE_FILE"
+        set_progress 1
       fi
     } > "$LOG_FILE" 2>&1; then
       stop_progress 0

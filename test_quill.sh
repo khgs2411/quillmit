@@ -297,9 +297,10 @@ test_large_context_uses_parallel_batches_and_synthesis() {
   local output
   output="$(QUILL_PROMPT_CAPTURE_DIR="$captures" PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --config "$config" --quit "$repo")"
 
-  assert_contains "$output" "Large Git context detected"
+  assert_contains "$output" "Large change detected: 3 files"
   assert_contains "$output" "parallel batches"
   assert_contains "$output" "Add terminal commit message helper"
+  assert_not_contains "$output" "diff_bytes="
   local summary_count
   summary_count="$(grep -l "Summarize this portion" "$captures"/* | wc -l | tr -d ' ')"
   [[ "$summary_count" -gt 1 ]] || fail "expected multiple summary invocations"
@@ -318,7 +319,8 @@ test_single_oversized_file_splits_across_batches() {
   local output
   output="$(QUILL_PROMPT_CAPTURE_DIR="$captures" PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --config "$config" --quit "$repo")"
 
-  assert_contains "$output" "Large Git context detected"
+  assert_contains "$output" "Large change detected: 1 file"
+  assert_not_contains "$output" "diff_bytes="
   local summary_count
   summary_count="$(grep -l "Summarize this portion" "$captures"/* | wc -l | tr -d ' ')"
   [[ "$summary_count" -gt 1 ]] || fail "expected one oversized file to span multiple summary invocations"
@@ -340,15 +342,17 @@ CONFIG
 
   local claude_output
   claude_output="$(PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --config "$config" --claude --quit "$repo")"
-  assert_contains "$claude_output" "Large Git context detected"
+  assert_contains "$claude_output" "Large change detected"
+  assert_not_contains "$claude_output" "diff_bytes="
 
   local gemini_output
   gemini_output="$(PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --config "$config" --gemini --quit "$repo")"
-  assert_contains "$gemini_output" "Large Git context detected"
+  assert_contains "$gemini_output" "Large change detected"
+  assert_not_contains "$gemini_output" "diff_bytes="
 
   local codex_output
   codex_output="$(PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --config "$config" --codex --quit "$repo")"
-  assert_not_contains "$codex_output" "Large Git context detected"
+  assert_not_contains "$codex_output" "Large change detected"
 }
 
 test_commits_with_generated_message() {
@@ -659,12 +663,17 @@ test_install_copies_versioned_quill_package() {
   local install_bin="$TMP_ROOT/install-bin"
   local install_root="$TMP_ROOT/install root"
   mkdir -p "$install_bin"
+  mkdir -p "$install_root/versions/0.2.9" "$install_root/versions/notes"
+  print -r -- "old" > "$install_root/versions/0.2.9/quill"
+  print -r -- "old" > "$install_root/versions/0.2.9/quill.config"
+  print -r -- "0.2.9" > "$install_root/versions/0.2.9/VERSION"
+  print -r -- "keep" > "$install_root/versions/notes/README"
   ln -s "$ROOT/gcommit" "$install_bin/gcommit"
   ln -s "/Users/liadgoren/Repositories/quill/quill" "$install_bin/old-quill"
   ln -s "/Users/liadgoren/Repositories/quill/quill" "$install_bin/quill"
 
   local output
-  output="$("$ROOT/install" --bin-dir "$install_bin" --install-root "$install_root")"
+  output="$("$ROOT/install" --bin-dir "$install_bin" --install-root "$install_root" 2>&1)"
 
   local version
   version="$(<"$ROOT/VERSION")"
@@ -673,16 +682,20 @@ test_install_copies_versioned_quill_package() {
   assert_contains "$output" "Installed quill launcher"
   assert_contains "$output" "Removed legacy gcommit"
   assert_contains "$output" "Removed legacy quill symlink"
+  assert_contains "$output" "Removed Quillmit 0.2.9"
+  assert_contains "$output" "Preserved unrecognized install artifact"
   [[ -f "$install_bin/quill" && ! -L "$install_bin/quill" ]] || fail "expected a copied quill launcher"
   [[ -x "$install_bin/quill" ]] || fail "expected executable quill launcher"
   assert_equals "$("$install_bin/quill" --version)" "quill $version"
   cmp -s "$ROOT/quill" "$version_dir/quill" || fail "installed quill differs from release source"
   cmp -s "$ROOT/quill.config" "$version_dir/quill.config" || fail "installed config differs from release source"
   cmp -s "$ROOT/VERSION" "$version_dir/VERSION" || fail "installed version differs from release source"
+  [[ ! -e "$install_root/versions/0.2.9" ]] || fail "expected old Quillmit version to be removed"
+  [[ -f "$install_root/versions/notes/README" ]] || fail "expected unrecognized install artifact to be preserved"
   [[ ! -e "$install_bin/gcommit" ]] || fail "did not expect gcommit symlink"
   [[ -L "$install_bin/old-quill" ]] || fail "unrelated legacy-looking symlink should remain when not named quill"
 
-  "$ROOT/install" --bin-dir "$install_bin" --install-root "$install_root" >/dev/null
+  "$ROOT/install" --bin-dir "$install_bin" --install-root "$install_root" >/dev/null 2>&1
   print -r -- "changed" >> "$version_dir/quill"
   local failure="$TMP_ROOT/install-version-mismatch.txt"
   if "$ROOT/install" --bin-dir "$install_bin" --install-root "$install_root" > "$failure" 2>&1; then

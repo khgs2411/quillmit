@@ -1,0 +1,102 @@
+#!/bin/zsh
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BUMP_FLAG="--patch"
+BUMP_SELECTED=0
+
+usage() {
+  cat <<'TEXT'
+Usage: deploy [--patch|--minor|--major]
+
+Bump VERSION (default: patch), verify and install the release, publish it with
+Quillmit, wait for GitHub Actions, then create the matching GitHub release.
+
+All working-tree changes are included in the release commit.
+TEXT
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --patch|--minor|--major)
+      if [[ "$BUMP_SELECTED" -eq 1 ]]; then
+        print -u2 -- "Choose exactly one of --patch, --minor, or --major."
+        exit 1
+      fi
+      BUMP_FLAG="$1"
+      BUMP_SELECTED=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      print -u2 -- "Unknown option: $1"
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+for command in git gh quill; do
+  if ! command -v "$command" >/dev/null 2>&1; then
+    print -u2 -- "Required command not found: $command"
+    exit 1
+  fi
+done
+
+branch="$(git -C "$SCRIPT_DIR" branch --show-current)"
+if [[ "$branch" != "master" ]]; then
+  print -u2 -- "Deployments must run from master; current branch: $branch"
+  exit 1
+fi
+
+gh auth status >/dev/null
+git -C "$SCRIPT_DIR" fetch origin master
+local_head="$(git -C "$SCRIPT_DIR" rev-parse HEAD)"
+remote_head="$(git -C "$SCRIPT_DIR" rev-parse origin/master)"
+if [[ "$local_head" != "$remote_head" ]]; then
+  print -u2 -- "Local master must match origin/master before deployment."
+  exit 1
+fi
+
+"$SCRIPT_DIR/scripts/version" "$BUMP_FLAG"
+release_version="$(tr -d '[:space:]' < "$SCRIPT_DIR/VERSION")"
+tag="v$release_version"
+
+if gh release view "$tag" >/dev/null 2>&1; then
+  print -u2 -- "GitHub release already exists: $tag"
+  exit 1
+fi
+
+zsh -n "$SCRIPT_DIR/quill"
+zsh -n "$SCRIPT_DIR/install"
+zsh -n "$SCRIPT_DIR/scripts/version"
+zsh -n "$SCRIPT_DIR/deploy"
+zsh -n "$SCRIPT_DIR/test_quill.sh"
+zsh "$SCRIPT_DIR/test_quill.sh"
+"$SCRIPT_DIR/install"
+
+quill --add --commit --push "$SCRIPT_DIR"
+release_commit="$(git -C "$SCRIPT_DIR" rev-parse HEAD)"
+
+run_id=""
+for attempt in {1..30}; do
+  run_id="$(gh run list --commit "$release_commit" --workflow Test --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
+  [[ -n "$run_id" ]] && break
+  sleep 2
+done
+if [[ -z "$run_id" ]]; then
+  print -u2 -- "Timed out waiting for the GitHub Actions run for $release_commit."
+  exit 1
+fi
+
+gh run watch "$run_id" --exit-status
+gh release create "$tag" \
+  --target "$release_commit" \
+  --title "Quillmit $tag" \
+  --generate-notes \
+  --fail-on-no-commits
+
+print -- "Deployed Quillmit $release_version from $release_commit"

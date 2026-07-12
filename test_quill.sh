@@ -691,6 +691,54 @@ test_install_copies_versioned_quill_package() {
   assert_contains "$(<"$failure")" "Bump VERSION before installing changed release bytes"
 }
 
+test_version_script_supports_semantic_bumps() {
+  local sandbox="$TMP_ROOT/version-script"
+  mkdir -p "$sandbox/scripts"
+  cp "$ROOT/scripts/version" "$sandbox/scripts/version"
+  print -r -- "2.4.9" > "$sandbox/VERSION"
+
+  local output
+  output="$("$sandbox/scripts/version")"
+  assert_contains "$output" "2.4.9 -> 2.4.10 (patch)"
+  assert_equals "$(<"$sandbox/VERSION")" "2.4.10"
+
+  output="$("$sandbox/scripts/version" --minor)"
+  assert_contains "$output" "2.4.10 -> 2.5.0 (minor)"
+  assert_equals "$(<"$sandbox/VERSION")" "2.5.0"
+
+  output="$("$sandbox/scripts/version" --major)"
+  assert_contains "$output" "2.5.0 -> 3.0.0 (major)"
+  assert_equals "$(<"$sandbox/VERSION")" "3.0.0"
+}
+
+test_version_and_deploy_reject_multiple_bump_flags() {
+  local sandbox="$TMP_ROOT/version-invalid"
+  mkdir -p "$sandbox/scripts"
+  cp "$ROOT/scripts/version" "$sandbox/scripts/version"
+  print -r -- "1.0.0" > "$sandbox/VERSION"
+
+  local failure="$TMP_ROOT/version-multiple-flags.txt"
+  if "$sandbox/scripts/version" --patch --minor > "$failure" 2>&1; then
+    fail "expected version to reject multiple bump flags"
+  fi
+  assert_contains "$(<"$failure")" "Choose exactly one"
+  assert_equals "$(<"$sandbox/VERSION")" "1.0.0"
+
+  failure="$TMP_ROOT/deploy-multiple-flags.txt"
+  if "$ROOT/deploy" --minor --major > "$failure" 2>&1; then
+    fail "expected deploy to reject multiple bump flags"
+  fi
+  assert_contains "$(<"$failure")" "Choose exactly one"
+}
+
+test_deploy_help_documents_release_boundary() {
+  local output
+  output="$("$ROOT/deploy" --help)"
+  assert_contains "$output" "default: patch"
+  assert_contains "$output" "All working-tree changes are included"
+  assert_contains "$output" "create the matching GitHub release"
+}
+
 test_clean_repo_reports_no_changes
 test_codex_is_default_and_receives_git_context
 test_default_prepares_and_prompts_for_action
@@ -723,5 +771,8 @@ test_push_rejects_non_commit_modes_before_generation
 test_full_rejects_non_commit_modes_regardless_of_order
 test_readme_documents_push_and_full_flags
 test_install_copies_versioned_quill_package
+test_version_script_supports_semantic_bumps
+test_version_and_deploy_reject_multiple_bump_flags
+test_deploy_help_documents_release_boundary
 
 print -- "All tests passed"

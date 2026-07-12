@@ -91,6 +91,47 @@ Confirm the installed release with:
 quill --version
 ```
 
+## Versioning And Deployment
+
+Versioning, installation, and deployment are separate operations:
+
+- `scripts/version` changes the repository's `VERSION` only.
+- `install` installs exactly the declared `VERSION` locally and never changes it.
+- `deploy` coordinates a version bump, verification, local installation,
+  Quillmit commit/push, GitHub Actions, and the matching GitHub release.
+
+The version script defaults to a patch increment:
+
+```sh
+./scripts/version          # 0.3.0 -> 0.3.1
+./scripts/version --patch  # 0.3.0 -> 0.3.1
+./scripts/version --minor  # 0.3.0 -> 0.4.0
+./scripts/version --major  # 0.3.0 -> 1.0.0
+```
+
+To version and install a local build without publishing it:
+
+```sh
+./scripts/version  # or --minor / --major
+./install
+quill --version
+```
+
+Deployment uses the same version script and also defaults to a patch release:
+
+```sh
+./deploy          # patch release
+./deploy --patch
+./deploy --minor
+./deploy --major
+```
+
+Deployments must run from `master` while it matches `origin/master`. The deploy
+script publishes every working-tree change, so review the complete diff first.
+It requires authenticated `gh` and the selected provider CLI. It stops before
+creating the GitHub release if local verification, push, or GitHub Actions
+fails.
+
 ## Usage
 
 ```sh

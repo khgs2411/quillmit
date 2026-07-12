@@ -17,6 +17,8 @@ jobs:
         run: |
           zsh -n quill
           zsh -n install
+          zsh -n deploy
+          zsh -n scripts/version
           zsh -n test_quill.sh
 
       - name: Run tests

@@ -19,6 +19,7 @@ The project is Quillmit. The executable is `quill`.
 
 - Uses your local AI CLI subscriptions instead of a separate hosted service.
 - Supports Codex, Claude Code, and Gemini CLI.
+- Supports a fallback model for each provider when the primary model reaches a usage limit.
 - Reads staged changes first; if nothing is staged, reads the working tree.
 - Stages all changes immediately when `--add` or `--full` is passed.
 - Commits only staged changes.
@@ -226,13 +227,23 @@ Edit `quill.config`:
 DEFAULT_PROVIDER=codex
 
 CODEX_MODEL=gpt-5.3-codex-spark
+CODEX_FALLBACK_MODEL=gpt-5.6-luna
+CODEX_FALLBACK_REASONING_EFFORT=low
 CLAUDE_MODEL=haiku
+CLAUDE_FALLBACK_MODEL=haiku
 GEMINI_MODEL=gemini-3-flash-preview
+GEMINI_FALLBACK_MODEL=gemini-3-flash-preview
 
 CODEX_MAX_PROMPT_BYTES=160000
 CLAUDE_MAX_PROMPT_BYTES=160000
 GEMINI_MAX_PROMPT_BYTES=160000
 ```
+
+If a primary model reports a usage limit, Quillmit retries the same request once
+with that provider's fallback model. A fallback value that is empty or equal to
+the primary model disables the retry. The Codex fallback call also uses
+`CODEX_FALLBACK_REASONING_EFFORT`. Other provider failures do not trigger a
+fallback.
 
 The byte budgets are conservative input limits that reserve context for
 provider instructions and output. They can be tuned independently when using a

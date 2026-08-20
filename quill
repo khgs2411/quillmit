@@ -27,8 +27,12 @@ CONFIG_FILE="$SCRIPT_DIR/quill.config"
 
 DEFAULT_PROVIDER=codex
 CODEX_MODEL=gpt-5.3-codex-spark
+CODEX_FALLBACK_MODEL=gpt-5.6-luna
+CODEX_FALLBACK_REASONING_EFFORT=low
 CLAUDE_MODEL=haiku
+CLAUDE_FALLBACK_MODEL=haiku
 GEMINI_MODEL=gemini-3-flash-preview
+GEMINI_FALLBACK_MODEL=gemini-3-flash-preview
 CODEX_MAX_PROMPT_BYTES=160000
 CLAUDE_MAX_PROMPT_BYTES=160000
 GEMINI_MAX_PROMPT_BYTES=160000
@@ -158,6 +162,14 @@ provider_model() {
   esac
 }
 
+provider_fallback_model() {
+  case "$PROVIDER" in
+    codex) print -- "$CODEX_FALLBACK_MODEL" ;;
+    claude) print -- "$CLAUDE_FALLBACK_MODEL" ;;
+    gemini) print -- "$GEMINI_FALLBACK_MODEL" ;;
+  esac
+}
+
 provider_max_prompt_bytes() {
   case "$PROVIDER" in
     codex) print -- "$CODEX_MAX_PROMPT_BYTES" ;;
@@ -197,6 +209,7 @@ fi
 
 CLI="$(provider_command)"
 MODEL="$(provider_model)"
+FALLBACK_MODEL="$(provider_fallback_model)"
 MAX_PROMPT_BYTES="$(provider_max_prompt_bytes)"
 LABEL="$(provider_label)"
 
@@ -224,6 +237,7 @@ if ! { mkdir -p "$LOG_DIR" && : > "$LOG_FILE"; } 2>/dev/null; then
 fi
 PROGRESS_PID=""
 PROGRESS_FILE="$TMP_DIR/progress"
+FALLBACK_USED_FILE="$TMP_DIR/provider-fallback-used"
 PROGRESS_TOTAL=1
 PROGRESS_WIDTH=24
 BATCH_COUNT=0
@@ -520,24 +534,32 @@ stop_progress() {
   fi
 }
 
-run_provider() {
+run_provider_once() {
   local prompt_file="$1"
   local message_file="$2"
+  local model="$3"
+  local reasoning_effort="$4"
+  rm -f "$message_file"
   case "$PROVIDER" in
     codex)
-      codex exec \
-        -m "$MODEL" \
-        --cd "$REPO" \
-        --sandbox read-only \
-        --ephemeral \
-        -o "$message_file" \
-        - < "$prompt_file"
+      local -a args
+      args=(
+        exec
+        -m "$model"
+        --cd "$REPO"
+        --sandbox read-only
+        --ephemeral
+      )
+      if [[ -n "$reasoning_effort" ]]; then
+        args+=(-c "model_reasoning_effort=$reasoning_effort")
+      fi
+      codex "${args[@]}" -o "$message_file" - < "$prompt_file"
       ;;
     claude)
       claude \
         --bare \
         -p \
-        --model "$MODEL" \
+        --model "$model" \
         --output-format text \
         "Use stdin as the full task. Follow its output instructions exactly." \
         < "$prompt_file" > "$message_file"
@@ -545,10 +567,77 @@ run_provider() {
     gemini)
       gemini \
         -p "Use stdin as the full task. Follow its output instructions exactly." \
-        --model "$MODEL" \
+        --model "$model" \
         < "$prompt_file" > "$message_file"
       ;;
   esac
+}
+
+provider_hit_usage_limit() {
+  local provider_log="$1"
+  case "$PROVIDER" in
+    codex)
+      LC_ALL=C grep -Fqi "ERROR: You've hit your usage limit for" "$provider_log"
+      ;;
+    claude)
+      LC_ALL=C grep -Eqi 'usage limit|rate limit' "$provider_log"
+      ;;
+    gemini)
+      LC_ALL=C grep -Eqi 'usage limit|rate limit|quota.*(exceeded|exhausted)|resource_exhausted' "$provider_log"
+      ;;
+  esac
+}
+
+run_provider() {
+  local prompt_file="$1"
+  local message_file="$2"
+  local primary_log="$message_file.$PROVIDER-primary.log"
+  local fallback_log="$message_file.$PROVIDER-fallback.log"
+  local primary_status
+  local fallback_status
+  local fallback_reasoning_effort=""
+
+  if run_provider_once "$prompt_file" "$message_file" "$MODEL" "" > "$primary_log" 2>&1; then
+    cat "$primary_log"
+    if [[ -s "$message_file" ]]; then
+      return 0
+    fi
+    print -u2 -- "$LABEL completed without writing a commit message."
+    return 1
+  else
+    primary_status=$?
+  fi
+
+  cat "$primary_log"
+  if [[ -z "$FALLBACK_MODEL" || "$FALLBACK_MODEL" == "$MODEL" ]] || \
+     ! provider_hit_usage_limit "$primary_log"; then
+    return "$primary_status"
+  fi
+
+  if [[ "$PROVIDER" == "codex" ]]; then
+    fallback_reasoning_effort="$CODEX_FALLBACK_REASONING_EFFORT"
+  fi
+  print -u2 -- "$LABEL model $MODEL reached its usage limit. Retrying with $FALLBACK_MODEL."
+  if run_provider_once \
+    "$prompt_file" \
+    "$message_file" \
+    "$FALLBACK_MODEL" \
+    "$fallback_reasoning_effort" \
+    > "$fallback_log" 2>&1; then
+    fallback_status=0
+  else
+    fallback_status=$?
+  fi
+  cat "$fallback_log"
+  if [[ "$fallback_status" -ne 0 ]]; then
+    return "$fallback_status"
+  fi
+  if [[ ! -s "$message_file" ]]; then
+    print -u2 -- "$LABEL fallback completed without writing a commit message."
+    return 1
+  fi
+
+  print -r -- "$FALLBACK_MODEL" > "$FALLBACK_USED_FILE"
 }
 
 run_batched_provider() {
@@ -580,11 +669,12 @@ run_batched_provider() {
     print -u2 -- "Synthesis prompt exceeds ${PROVIDER:u}_MAX_PROMPT_BYTES ($synthesis_bytes > $MAX_PROMPT_BYTES)."
     return 1
   fi
-  run_provider "$TMP_DIR/synthesis.prompt" "$MESSAGE_FILE"
+  run_provider "$TMP_DIR/synthesis.prompt" "$MESSAGE_FILE" || return 1
   set_progress "$PROGRESS_TOTAL"
 }
 
 generate_message() {
+  rm -f "$FALLBACK_USED_FILE"
   write_git_context
 
   local prompt_bytes
@@ -619,8 +709,7 @@ generate_message() {
       if [[ "$batched" -eq 1 ]]; then
         run_batched_provider
       else
-        run_provider "$PROMPT_FILE" "$MESSAGE_FILE"
-        set_progress 1
+        run_provider "$PROMPT_FILE" "$MESSAGE_FILE" && set_progress 1
       fi
     } > "$LOG_FILE" 2>&1; then
       stop_progress 0
@@ -628,6 +717,14 @@ generate_message() {
       return 1
     fi
     stop_progress 1
+  fi
+
+  if [[ -f "$FALLBACK_USED_FILE" ]]; then
+    if [[ "$PROVIDER" == "codex" ]]; then
+      print -- "Used $LABEL fallback model: $FALLBACK_MODEL (reasoning: $CODEX_FALLBACK_REASONING_EFFORT)"
+    else
+      print -- "Used $LABEL fallback model: $FALLBACK_MODEL"
+    fi
   fi
 
   clean_message

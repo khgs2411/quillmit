@@ -27,6 +27,7 @@ CONFIG_FILE="$SCRIPT_DIR/quill.config"
 
 DEFAULT_PROVIDER=codex
 CODEX_MODEL=gpt-5.3-codex-spark
+CODEX_REASONING_EFFORT=""
 CODEX_FALLBACK_MODEL=gpt-5.6-luna
 CODEX_FALLBACK_REASONING_EFFORT=low
 CLAUDE_MODEL=haiku
@@ -595,9 +596,19 @@ run_provider() {
   local fallback_log="$message_file.$PROVIDER-fallback.log"
   local primary_status
   local fallback_status
+  local primary_reasoning_effort=""
   local fallback_reasoning_effort=""
 
-  if run_provider_once "$prompt_file" "$message_file" "$MODEL" "" > "$primary_log" 2>&1; then
+  if [[ "$PROVIDER" == "codex" ]]; then
+    primary_reasoning_effort="$CODEX_REASONING_EFFORT"
+  fi
+
+  if run_provider_once \
+    "$prompt_file" \
+    "$message_file" \
+    "$MODEL" \
+    "$primary_reasoning_effort" \
+    > "$primary_log" 2>&1; then
     cat "$primary_log"
     if [[ -s "$message_file" ]]; then
       return 0

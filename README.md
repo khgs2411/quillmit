@@ -226,8 +226,9 @@ Edit `quill.config`:
 ```sh
 DEFAULT_PROVIDER=codex
 
-CODEX_MODEL=gpt-5.3-codex-spark
-CODEX_FALLBACK_MODEL=gpt-5.6-luna
+CODEX_MODEL=gpt-5.6-luna
+CODEX_REASONING_EFFORT=low
+CODEX_FALLBACK_MODEL=
 CODEX_FALLBACK_REASONING_EFFORT=low
 CLAUDE_MODEL=haiku
 CLAUDE_FALLBACK_MODEL=haiku
@@ -241,7 +242,8 @@ GEMINI_MAX_PROMPT_BYTES=160000
 
 If a primary model reports a usage limit, Quillmit retries the same request once
 with that provider's fallback model. A fallback value that is empty or equal to
-the primary model disables the retry. The Codex fallback call also uses
+the primary model disables the retry. The Codex primary call uses
+`CODEX_REASONING_EFFORT`, and the fallback call uses
 `CODEX_FALLBACK_REASONING_EFFORT`. Other provider failures do not trigger a
 fallback.
 

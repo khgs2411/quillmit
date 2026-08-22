@@ -171,7 +171,8 @@ test_codex_is_default_and_receives_git_context() {
   assert_contains "$(<"$prompt_capture")" "?? file.txt"
   assert_contains "$(<"$prompt_capture")" "Do not use conventional commit prefixes"
   assert_contains "$(<"$prompt_capture")" "Bad: feat(pipeline): add telemetry"
-  assert_contains "$(<"$args_capture")" "gpt-5.3-codex-spark"
+  assert_contains "$(<"$args_capture")" "gpt-5.6-luna"
+  assert_contains "$(<"$args_capture")" "model_reasoning_effort=low"
   [[ -n "$(git -C "$repo" status --short)" ]] || fail "expected repo to remain dirty"
 }
 

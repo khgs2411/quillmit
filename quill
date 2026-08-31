@@ -9,12 +9,16 @@ fi
 
 usage() {
   cat <<'TEXT'
-Usage: quill [--codex|--claude|--gemini|--provider name] [--config file] [--prepare|--commit|--copy|--quit|--add|--push|--full|--verbose|--version] [repo]
+Usage:
+  quill [-a|-c|-p|-f] [--codex|--claude|--gemini|--provider name] [--config file] [--prepare|--commit|--copy|--quit|--add|--push|--full|--verbose|--version] [repo]
+  quill pr [--codex|--claude|--gemini|--provider name] [--config file] [--verbose] [repo]
 
 Generate a medium-sized Git commit message, prepare it, then choose an action.
+Use "quill pr" to select a remote base branch and create a pull request.
 TEXT
 }
 
+WORKFLOW="commit"
 MODE="interactive"
 REPO_INPUT=""
 VERBOSE=0
@@ -38,6 +42,11 @@ CODEX_MAX_PROMPT_BYTES=160000
 CLAUDE_MAX_PROMPT_BYTES=160000
 GEMINI_MAX_PROMPT_BYTES=160000
 
+if [[ "${1:-}" == "pr" ]]; then
+  WORKFLOW="pr"
+  shift
+fi
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --prepare)
@@ -45,7 +54,7 @@ while [[ $# -gt 0 ]]; do
       NON_COMMIT_MODE_FLAGS="${NON_COMMIT_MODE_FLAGS:+$NON_COMMIT_MODE_FLAGS }--prepare"
       shift
       ;;
-    --yes|--commit)
+    -c|--yes|--commit)
       MODE="commit"
       shift
       ;;
@@ -63,15 +72,15 @@ while [[ $# -gt 0 ]]; do
       VERBOSE=1
       shift
       ;;
-    --add)
+    -a|--add)
       ADD_ALL=1
       shift
       ;;
-    --push)
+    -p|--push)
       PUSH_AFTER_COMMIT=1
       shift
       ;;
-    --full)
+    -f|--full)
       ADD_ALL=1
       PUSH_AFTER_COMMIT=1
       FULL_REQUESTED=1
@@ -112,6 +121,11 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ "$WORKFLOW" == "pr" && ( "$MODE" != "interactive" || "$ADD_ALL" -eq 1 || "$PUSH_AFTER_COMMIT" -eq 1 ) ]]; then
+  print -u2 -- "Commit workflow flags cannot be combined with quill pr."
+  exit 1
+fi
 
 if [[ "$PUSH_AFTER_COMMIT" -eq 1 && -n "$NON_COMMIT_MODE_FLAGS" ]]; then
   local_flag="${NON_COMMIT_MODE_FLAGS%% *}"
@@ -179,6 +193,110 @@ provider_max_prompt_bytes() {
   esac
 }
 
+SELECTED_OPTION=""
+
+select_option() {
+  local prompt="$1"
+  shift
+  local -a options=("$@")
+  local selection
+  local index
+
+  if [[ "${#options[@]}" -eq 0 ]]; then
+    print -u2 -- "No options are available for $prompt."
+    return 1
+  fi
+
+  print -- "$prompt"
+  for ((index = 1; index <= ${#options[@]}; index++)); do
+    print -- "  $index) ${options[$index]}"
+  done
+
+  while true; do
+    print -n -- "Selection [1]: "
+    if ! read -r selection; then
+      print -u2 -- "A selection is required."
+      return 1
+    fi
+    selection="${selection:-1}"
+    if [[ "$selection" =~ '^[0-9]+$' && "$selection" -ge 1 && "$selection" -le "${#options[@]}" ]]; then
+      SELECTED_OPTION="${options[$selection]}"
+      return 0
+    fi
+    print -- "Choose a number from 1 to ${#options[@]}."
+  done
+}
+
+select_pr_base() {
+  local -a remotes
+  remotes=("${(@f)$(git -C "$REPO" remote)}")
+  if [[ "${#remotes[@]}" -eq 0 ]]; then
+    print -u2 -- "No Git remote is configured."
+    return 1
+  fi
+
+  if [[ "${#remotes[@]}" -eq 1 ]]; then
+    PR_BASE_REMOTE="${remotes[1]}"
+    print -- "Using base remote: $PR_BASE_REMOTE"
+  else
+    select_option "Select the pull request base remote:" "${remotes[@]}"
+    PR_BASE_REMOTE="$SELECTED_OPTION"
+  fi
+
+  print -- "Fetching branches from $PR_BASE_REMOTE..."
+  git -C "$REPO" fetch --prune "$PR_BASE_REMOTE"
+
+  local default_ref
+  local default_branch
+  local branch
+  local -a discovered_branches
+  default_ref="$(git -C "$REPO" symbolic-ref --quiet --short "refs/remotes/$PR_BASE_REMOTE/HEAD" 2>/dev/null || true)"
+  default_branch="${default_ref#"$PR_BASE_REMOTE/"}"
+  discovered_branches=("${(@f)$(git -C "$REPO" for-each-ref --format='%(refname:strip=3)' "refs/remotes/$PR_BASE_REMOTE")}")
+
+  discovered_branches=("${(@on)discovered_branches}")
+  local -a branches
+  if [[ -n "$default_branch" ]]; then
+    branches+=("$default_branch")
+  fi
+  for branch in "${discovered_branches[@]}"; do
+    [[ "$branch" == "HEAD" || "$branch" == "$default_branch" ]] && continue
+    branches+=("$branch")
+  done
+
+  select_option "Select the pull request base branch on $PR_BASE_REMOTE:" "${branches[@]}"
+  PR_BASE_BRANCH="$SELECTED_OPTION"
+  PR_BASE_REF="refs/remotes/$PR_BASE_REMOTE/$PR_BASE_BRANCH"
+  PR_BASE_URL="$(git -C "$REPO" remote get-url "$PR_BASE_REMOTE")"
+
+  if ! PR_BASE_REPO="$(gh repo view "$PR_BASE_URL" --json nameWithOwner --jq .nameWithOwner)"; then
+    print -u2 -- "The selected base remote is not available through GitHub CLI: $PR_BASE_REMOTE"
+    return 1
+  fi
+}
+
+setup_pr_context() {
+  if ! command -v gh >/dev/null 2>&1; then
+    print -u2 -- "GitHub CLI not found in PATH: gh"
+    return 1
+  fi
+
+  if ! PR_HEAD_BRANCH="$(git -C "$REPO" symbolic-ref --quiet --short HEAD)"; then
+    print -u2 -- "Cannot create a pull request from a detached HEAD."
+    return 1
+  fi
+
+  select_pr_base
+
+  if [[ "$(git -C "$REPO" rev-list --count "$PR_BASE_REF..HEAD")" -eq 0 ]]; then
+    print -u2 -- "No commits exist between $PR_BASE_REMOTE/$PR_BASE_BRANCH and $PR_HEAD_BRANCH."
+    return 1
+  fi
+
+  CONTEXT_MODE="committed pull request changes"
+  OUTPUT_NAME="pull request title and description"
+}
+
 if [[ -z "$REPO_INPUT" ]]; then
   REPO_INPUT="$PWD"
 fi
@@ -193,19 +311,24 @@ REPO="$(git -C "$REPO_INPUT" rev-parse --show-toplevel 2>/dev/null)" || {
   exit 1
 }
 
-if [[ -z "$(git -C "$REPO" status --short)" ]]; then
-  print -- "No changes to commit in $REPO"
-  exit 0
-fi
-
-if [[ "$ADD_ALL" -eq 1 ]]; then
-  git -C "$REPO" add -A
-fi
-
-if [[ -n "$(git -C "$REPO" diff --cached --name-only)" ]]; then
-  CONTEXT_MODE="staged changes only"
+OUTPUT_NAME="commit message"
+if [[ "$WORKFLOW" == "pr" ]]; then
+  setup_pr_context
 else
-  CONTEXT_MODE="all changed files"
+  if [[ -z "$(git -C "$REPO" status --short)" ]]; then
+    print -- "No changes to commit in $REPO"
+    exit 0
+  fi
+
+  if [[ "$ADD_ALL" -eq 1 ]]; then
+    git -C "$REPO" add -A
+  fi
+
+  if [[ -n "$(git -C "$REPO" diff --cached --name-only)" ]]; then
+    CONTEXT_MODE="staged changes only"
+  else
+    CONTEXT_MODE="all changed files"
+  fi
 fi
 
 CLI="$(provider_command)"
@@ -245,7 +368,21 @@ BATCH_COUNT=0
 BATCH_FILE_COUNT=0
 BATCH_CONTENT_BYTES=$((MAX_PROMPT_BYTES - 12000))
 
-write_message_requirements() {
+write_output_requirements() {
+  if [[ "$WORKFLOW" == "pr" ]]; then
+    print -- "Return only the pull request title and description."
+    print -- "Put the title on the first line, then one blank line, then the Markdown description."
+    print -- ""
+    print -- "Requirements:"
+    print -- "- Write a concise title that describes the complete branch change."
+    print -- "- Do not use conventional commit prefixes such as feat:, fix:, chore:, docs:, refactor:, or test:."
+    print -- "- Explain the intent and important behavior in the description."
+    print -- "- Use concise Markdown sections or bullets when they improve clarity."
+    print -- "- Do not invent validation results, issue links, risks, or implementation details."
+    print -- "- Do not wrap the response in quotes or an outer Markdown code fence."
+    return
+  fi
+
   print -- "Return only the commit message text."
   print -- ""
   print -- "Requirements:"
@@ -267,7 +404,17 @@ write_git_overview() {
   print -- ""
   print -- "Context mode: $CONTEXT_MODE"
   print -- ""
-  if [[ "$CONTEXT_MODE" == "staged changes only" ]]; then
+  if [[ "$WORKFLOW" == "pr" ]]; then
+    print -- "Base repository: $PR_BASE_REPO"
+    print -- "Base branch: $PR_BASE_REMOTE/$PR_BASE_BRANCH"
+    print -- "Head branch: $PR_HEAD_BRANCH"
+    print -- ""
+    print -- "Commits in the pull request:"
+    git -C "$REPO" log --format='- %h %s' "$PR_BASE_REF..HEAD"
+    print -- ""
+    print -- "Pull request diff --stat:"
+    git -C "$REPO" diff --no-ext-diff --stat "$PR_BASE_REF...HEAD"
+  elif [[ "$CONTEXT_MODE" == "staged changes only" ]]; then
     print -- "Staged files:"
     git -C "$REPO" diff --cached --name-status
     print -- ""
@@ -286,24 +433,43 @@ write_git_overview() {
 }
 
 write_diff() {
-  if [[ "$CONTEXT_MODE" == "staged changes only" ]]; then
+  if [[ "$WORKFLOW" == "pr" ]]; then
+    git -C "$REPO" diff --no-ext-diff "$PR_BASE_REF...HEAD" "$@"
+  elif [[ "$CONTEXT_MODE" == "staged changes only" ]]; then
     git -C "$REPO" diff --cached --no-ext-diff "$@"
   else
     git -C "$REPO" diff --no-ext-diff "$@"
   fi
 }
 
+write_changed_file_names() {
+  if [[ "$WORKFLOW" == "pr" ]]; then
+    git -C "$REPO" diff --no-ext-diff --name-only -z "$PR_BASE_REF...HEAD"
+  elif [[ "$CONTEXT_MODE" == "staged changes only" ]]; then
+    git -C "$REPO" diff --cached --name-only -z
+  else
+    git -C "$REPO" diff --name-only -z
+  fi
+}
+
 write_git_context() {
   {
-    print -- "Generate a git commit message from the Git context below."
+    if [[ "$WORKFLOW" == "pr" ]]; then
+      print -- "Generate a pull request title and description from the committed Git changes below."
+    else
+      print -- "Generate a git commit message from the Git context below."
+    fi
     print -- ""
     print -- "Do not inspect the repository yourself. Do not run commands. Do not modify files. Do not stage files. Do not commit."
     print -- ""
-    write_message_requirements
+    write_output_requirements
     print -- ""
     write_git_overview
     print -- ""
-    if [[ "$CONTEXT_MODE" == "staged changes only" ]]; then
+    if [[ "$WORKFLOW" == "pr" ]]; then
+      print -- "Pull request diff:"
+      write_diff
+    elif [[ "$CONTEXT_MODE" == "staged changes only" ]]; then
       print -- "Staged diff:"
       write_diff
     else
@@ -418,7 +584,7 @@ build_batches() {
     else
       append_batch_unit "$diff_file" "File: $file"
     fi
-  done < <(if [[ "$CONTEXT_MODE" == "staged changes only" ]]; then git -C "$REPO" diff --cached --name-only -z; else git -C "$REPO" diff --name-only -z; fi)
+  done < <(write_changed_file_names)
   BATCH_FILE_COUNT="$file_index"
 }
 
@@ -426,9 +592,13 @@ write_batch_prompts() {
   local batch
   for ((batch = 1; batch <= BATCH_COUNT; batch++)); do
     {
-      print -- "Summarize this portion of a larger Git change for a final commit-message writer."
+      if [[ "$WORKFLOW" == "pr" ]]; then
+        print -- "Summarize this portion of a larger Git change for a final pull-request writer."
+      else
+        print -- "Summarize this portion of a larger Git change for a final commit-message writer."
+      fi
       print -- "Do not inspect the repository, run commands, modify files, stage files, or commit."
-      print -- "Identify intent and externally meaningful behavior across files; do not produce a commit message."
+      print -- "Identify intent and externally meaningful behavior across files; do not produce the final text."
       print -- "Return at most six concise bullets covering intent, behavior/contracts, tests, documentation, and material risks."
       print -- ""
       print -- "Repository: $REPO"
@@ -443,11 +613,15 @@ write_batch_prompts() {
 
 write_synthesis_prompt() {
   {
-    print -- "Generate one git commit message from summaries of a large Git diff."
+    if [[ "$WORKFLOW" == "pr" ]]; then
+      print -- "Generate one pull request title and description from summaries of a large Git diff."
+    else
+      print -- "Generate one git commit message from summaries of a large Git diff."
+    fi
     print -- "Do not inspect the repository yourself. Do not run commands. Do not modify files. Do not stage files. Do not commit."
     print -- "Synthesize the overall intent; summaries may overlap, so do not concatenate or mechanically enumerate them."
     print -- ""
-    write_message_requirements
+    write_output_requirements
     print -- ""
     write_git_overview
     print -- ""
@@ -503,14 +677,14 @@ start_progress() {
             bar+="-"
           fi
         done
-        print -n -- $'\r'"Generating with $LABEL [$bar] $completed/$PROGRESS_TOTAL"
+        print -n -- $'\r'"Generating $OUTPUT_NAME with $LABEL [$bar] $completed/$PROGRESS_TOTAL"
         tick=$((tick + 1))
         sleep 0.12
       done
     ) &
     PROGRESS_PID="$!"
   else
-    print -- "Generating commit message with $LABEL..."
+    print -- "Generating $OUTPUT_NAME with $LABEL..."
   fi
 }
 
@@ -528,9 +702,9 @@ stop_progress() {
       local bar=""
       local position
       for ((position = 1; position <= PROGRESS_WIDTH; position++)); do bar+="="; done
-      print -- $'\r'"Generated with $LABEL [$bar] done"
+      print -- $'\r'"Generated $OUTPUT_NAME with $LABEL [$bar] done"
     else
-      print -- $'\r'"$LABEL failed while generating the commit message."
+      print -- $'\r'"$LABEL failed while generating the $OUTPUT_NAME."
     fi
   fi
 }
@@ -613,7 +787,7 @@ run_provider() {
     if [[ -s "$message_file" ]]; then
       return 0
     fi
-    print -u2 -- "$LABEL completed without writing a commit message."
+    print -u2 -- "$LABEL completed without writing the $OUTPUT_NAME."
     return 1
   else
     primary_status=$?
@@ -644,7 +818,7 @@ run_provider() {
     return "$fallback_status"
   fi
   if [[ ! -s "$message_file" ]]; then
-    print -u2 -- "$LABEL fallback completed without writing a commit message."
+    print -u2 -- "$LABEL fallback completed without writing the $OUTPUT_NAME."
     return 1
   fi
 
@@ -800,7 +974,37 @@ copy_message() {
   print -- "Copied commit message to clipboard"
 }
 
+create_pull_request() {
+  local title
+  local body_file="$TMP_DIR/pr-body.md"
+
+  title="$(awk 'NF { print; exit }' "$MESSAGE_FILE")"
+  awk '!title_seen && NF { title_seen=1; next } title_seen && (body_seen || NF) { body_seen=1; print }' "$MESSAGE_FILE" > "$body_file"
+  if [[ -z "$title" ]]; then
+    print -u2 -- "$LABEL did not generate a pull request title."
+    return 1
+  fi
+  if [[ ! -s "$body_file" ]]; then
+    print -u2 -- "$LABEL did not generate a pull request description."
+    return 1
+  fi
+
+  print -- "Creating pull request from $PR_HEAD_BRANCH into $PR_BASE_REPO:$PR_BASE_BRANCH..."
+  gh pr create \
+    --repo "$PR_BASE_URL" \
+    --base "$PR_BASE_BRANCH" \
+    --assignee "@me" \
+    --title "$title" \
+    --body-file "$body_file"
+}
+
 generate_message
+
+if [[ "$WORKFLOW" == "pr" ]]; then
+  create_pull_request
+  exit 0
+fi
+
 show_message
 
 if [[ "$MODE" == "interactive" ]]; then

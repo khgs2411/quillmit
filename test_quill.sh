@@ -103,6 +103,47 @@ set -euo pipefail
 cat > "${WLCOPY_CAPTURE:?WLCOPY_CAPTURE is required}"
 SCRIPT
   chmod +x "$bin/wl-copy"
+  cat > "$bin/gh" <<'SCRIPT'
+#!/bin/zsh
+set -euo pipefail
+
+if [[ "${1:-}" == "repo" && "${2:-}" == "view" ]]; then
+  print -- "${GH_REPO_NAME:-test/repo}"
+  exit 0
+fi
+
+if [[ "${1:-}" != "pr" || "${2:-}" != "create" ]]; then
+  print -u2 -- "Unsupported fake gh command: $*"
+  exit 1
+fi
+
+if [[ -n "${GH_ARGS_CAPTURE:-}" ]]; then
+  print -r -- "$*" > "$GH_ARGS_CAPTURE"
+fi
+
+body_file=""
+shift 2
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --body-file)
+      body_file="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+if [[ -n "${GH_BODY_CAPTURE:-}" ]]; then
+  cp "$body_file" "$GH_BODY_CAPTURE"
+fi
+if [[ "${GH_SIMULATE_PUSH:-0}" -eq 1 ]]; then
+  git -C "${GH_REPO_PATH:?GH_REPO_PATH is required}" push --set-upstream origin HEAD >/dev/null
+fi
+print -- "https://github.com/test/repo/pull/1"
+SCRIPT
+  chmod +x "$bin/gh"
   print -r -- "$bin:$PATH"
 }
 
@@ -137,6 +178,32 @@ make_dirty_repo_with_remote() {
   git -C "$repo" config branch.main.remote origin
   git -C "$repo" config branch.main.merge refs/heads/main
   print -r -- "hello" > "$repo/file.txt"
+}
+
+make_pr_repo() {
+  local repo="$1"
+  local remote="$2"
+  git init --bare -q "$remote"
+  git --git-dir "$remote" symbolic-ref HEAD refs/heads/main
+  git init -q "$repo"
+  git -C "$repo" config user.email "test@example.com"
+  git -C "$repo" config user.name "Test User"
+  git -C "$repo" branch -M main
+  git -C "$repo" remote add origin "$remote"
+  print -r -- "base" > "$repo/file.txt"
+  git -C "$repo" add file.txt
+  git -C "$repo" commit -m "Initial" >/dev/null
+  git -C "$repo" push -u origin main >/dev/null
+  git -C "$repo" switch -q -c develop
+  print -r -- "develop" > "$repo/develop.txt"
+  git -C "$repo" add develop.txt
+  git -C "$repo" commit -m "Add develop work" >/dev/null
+  git -C "$repo" push -u origin develop >/dev/null
+  git -C "$repo" switch -q main
+  git -C "$repo" switch -q -c feature
+  print -r -- "feature" > "$repo/feature.txt"
+  git -C "$repo" add feature.txt
+  git -C "$repo" commit -m "Add feature work" >/dev/null
 }
 
 commit_editmsg_path() {
@@ -545,6 +612,93 @@ test_full_stages_commits_and_pushes_all_changes() {
   [[ -z "$(git -C "$repo" status --short)" ]] || fail "expected repo to be clean after full push"
 }
 
+test_short_flags_match_long_workflows() {
+  local commit_repo="$TMP_ROOT/short-commit"
+  make_dirty_repo "$commit_repo"
+  git -C "$commit_repo" config user.email "test@example.com"
+  git -C "$commit_repo" config user.name "Test User"
+  git -C "$commit_repo" add file.txt
+  PATH="$(make_fake_bin):$PATH" "$ROOT/quill" -c "$commit_repo" >/dev/null
+  assert_equals "$(git -C "$commit_repo" log -1 --pretty=%s)" "Add terminal commit message helper"
+
+  local add_repo="$TMP_ROOT/short-add"
+  make_dirty_repo "$add_repo"
+  git -C "$add_repo" config user.email "test@example.com"
+  git -C "$add_repo" config user.name "Test User"
+  PATH="$(make_fake_bin):$PATH" "$ROOT/quill" -a -c "$add_repo" >/dev/null
+  assert_equals "$(git -C "$add_repo" show --pretty= --name-only HEAD)" "file.txt"
+
+  local push_repo="$TMP_ROOT/short-push"
+  local push_remote="$TMP_ROOT/short-push.git"
+  make_dirty_repo_with_remote "$push_repo" "$push_remote"
+  git -C "$push_repo" add file.txt
+  PATH="$(make_fake_bin):$PATH" "$ROOT/quill" -c -p "$push_repo" >/dev/null
+  assert_equals "$(git --git-dir "$push_remote" log -1 --pretty=%s)" "Add terminal commit message helper"
+
+  local full_repo="$TMP_ROOT/short-full"
+  local full_remote="$TMP_ROOT/short-full.git"
+  make_dirty_repo_with_remote "$full_repo" "$full_remote"
+  PATH="$(make_fake_bin):$PATH" "$ROOT/quill" -f "$full_repo" >/dev/null
+  assert_equals "$(git --git-dir "$full_remote" log -1 --pretty=%s)" "Add terminal commit message helper"
+}
+
+test_pr_flow_uses_selected_base_and_generated_content() {
+  local repo="$TMP_ROOT/pr-flow"
+  local remote="$TMP_ROOT/pr-flow.git"
+  make_pr_repo "$repo" "$remote"
+  print -r -- "not committed" > "$repo/uncommitted.txt"
+
+  local prompt_capture="$TMP_ROOT/pr-prompt.txt"
+  local gh_args_capture="$TMP_ROOT/pr-gh-args.txt"
+  local gh_body_capture="$TMP_ROOT/pr-gh-body.md"
+  local output
+  output="$(
+    print 2 | \
+      QUILL_STDIN_CAPTURE="$prompt_capture" \
+      GH_ARGS_CAPTURE="$gh_args_capture" \
+      GH_BODY_CAPTURE="$gh_body_capture" \
+      GH_SIMULATE_PUSH=1 \
+      GH_REPO_PATH="$repo" \
+      PATH="$(make_fake_bin):$PATH" \
+      "$ROOT/quill" pr "$repo"
+  )"
+
+  assert_contains "$output" "Select the pull request base branch"
+  assert_contains "$output" "Creating pull request from feature into test/repo:develop"
+  assert_contains "$output" "https://github.com/test/repo/pull/1"
+  assert_not_contains "$output" "Generated pull request"
+
+  local prompt
+  prompt="$(<"$prompt_capture")"
+  assert_contains "$prompt" "Generate a pull request title and description"
+  assert_contains "$prompt" "Base branch: origin/develop"
+  assert_contains "$prompt" "Head branch: feature"
+  assert_contains "$prompt" "feature.txt"
+  assert_not_contains "$prompt" "uncommitted.txt"
+
+  local gh_args
+  gh_args="$(<"$gh_args_capture")"
+  assert_contains "$gh_args" "pr create"
+  assert_contains "$gh_args" "--base develop"
+  assert_contains "$gh_args" "--assignee @me"
+  assert_contains "$gh_args" "--title Add terminal commit message helper"
+  assert_contains "$(<"$gh_body_capture")" "Reads the current Git state"
+  assert_equals "$(git --git-dir "$remote" rev-parse refs/heads/feature)" "$(git -C "$repo" rev-parse HEAD)"
+}
+
+test_pr_rejects_commit_workflow_flags() {
+  local repo="$TMP_ROOT/pr-invalid"
+  git init -q "$repo"
+  local output_file="$TMP_ROOT/pr-invalid-output.txt"
+
+  if PATH="$(make_fake_bin):$PATH" "$ROOT/quill" pr -c "$repo" > "$output_file" 2>&1; then
+    fail "expected quill pr to reject commit workflow flags"
+  fi
+
+  assert_contains "$(<"$output_file")" "Commit workflow flags cannot be combined with quill pr."
+  assert_not_contains "$(<"$output_file")" "Generating"
+}
+
 test_push_does_not_run_when_commit_has_no_staged_changes() {
   local repo="$TMP_ROOT/push-no-staged"
   local remote="$TMP_ROOT/push-no-staged.git"
@@ -657,6 +811,9 @@ test_readme_documents_push_and_full_flags() {
   assert_contains "$readme" "quill --commit --push"
   assert_contains "$readme" "quill --add --commit --push"
   assert_contains "$readme" "quill --full"
+  assert_contains "$readme" "quill -c -p"
+  assert_contains "$readme" "quill -f"
+  assert_contains "$readme" "quill pr"
   assert_contains "$readme" "Push failures leave the local commit in place."
 }
 
@@ -777,6 +934,9 @@ test_copy_mode_supports_linux_clipboard_fallback
 test_commit_push_pushes_staged_commit
 test_yes_push_pushes_staged_commit
 test_full_stages_commits_and_pushes_all_changes
+test_short_flags_match_long_workflows
+test_pr_flow_uses_selected_base_and_generated_content
+test_pr_rejects_commit_workflow_flags
 test_push_does_not_run_when_commit_has_no_staged_changes
 test_push_failure_leaves_local_commit
 test_interactive_push_pushes_only_after_commit_choice

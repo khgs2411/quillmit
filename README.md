@@ -23,6 +23,8 @@ The project is Quillmit. The executable is `quill`.
 - Reads staged changes first; if nothing is staged, reads the working tree.
 - Stages all changes immediately when `--add` or `--full` is passed.
 - Commits only staged changes.
+- Provides `-a`, `-c`, `-p`, and `-f` aliases for common commit workflows.
+- Creates AI-written pull requests with interactive remote base-branch selection.
 - Prepares `.git/COMMIT_EDITMSG` by default.
 - Copies messages with `pbcopy`, `wl-copy`, `xclip`, or `xsel`.
 - Keeps provider transcripts hidden unless `--verbose` is enabled.
@@ -38,6 +40,9 @@ At least one provider CLI must be installed and authenticated:
 - Gemini CLI for `--gemini`.
 
 Quillmit does not install or authenticate provider CLIs for you.
+
+The `quill pr` workflow also requires an installed and authenticated GitHub CLI
+(`gh`).
 
 ## Compatibility
 
@@ -172,26 +177,48 @@ quill /absolute/path/to/repo
 For non-interactive commit after preview:
 
 ```sh
-quill --commit
-quill --commit --push
+quill -c
+quill -c -p
 ```
 
-`--yes` is still accepted as an alias.
+`--commit`, `--push`, and `--yes` remain accepted for compatibility and scripts.
 
 To stage all changes before committing:
 
 ```sh
-quill --add --commit
+quill -a -c
+quill -a -c -p
+quill -f
+```
+
+`-a` is the short form of `--add`. It stages everything before generating the
+commit message, even in interactive or non-commit modes. `-f` is the short form
+of `--full`; both are equivalent to `quill --add --commit --push`.
+
+`-p` is the short form of `--push`. It runs `git push` only after a successful
+local commit. In interactive mode, `quill -p` pushes only if you choose
+`[c]ommit`. Push failures leave the local commit in place.
+
+The equivalent long-form commands remain available:
+
+```sh
+quill --commit --push
 quill --add --commit --push
 quill --full
 ```
 
-`quill --add` stages everything before generating the commit message, even in
-interactive or non-commit modes. `quill --full` is equivalent to `quill --add
---commit --push`.
+To create a pull request:
 
-`--push` runs `git push` only after a successful local commit. In interactive
-mode, `quill --push` pushes only if you choose `[c]ommit`. Push failures leave the local commit in place.
+```sh
+quill pr
+```
+
+Quillmit fetches the selected remote, lets you select its base branch, and
+generates a title and Markdown description from the committed `base...HEAD`
+changes. It then calls `gh pr create`, assigns the pull request to you, and lets
+GitHub CLI push or fork the head branch when necessary. Uncommitted changes are
+not included. Provider and configuration flags remain available, for example
+`quill pr --claude` or `quill pr --config /path/to/quill.config`.
 
 To generate, preview, copy the message, and exit without committing:
 

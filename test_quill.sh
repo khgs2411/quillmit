@@ -838,7 +838,7 @@ make_install_source() {
   local source="$1"
   mkdir -p "$source/scripts" "$source/third-party" "$source/fake-bin" "$source/archive"
   cp "$ROOT/quill" "$ROOT/quill.config" "$ROOT/VERSION" "$ROOT/install" "$source/"
-  cp "$ROOT/scripts/setup-deps" "$source/scripts/"
+  cp "$ROOT/scripts/setup-deps" "$ROOT/scripts/worktree" "$source/scripts/"
   cp "$ROOT/third-party/fzf.LICENSE" "$source/third-party/"
   print -rl -- '#!/bin/sh' 'echo fixture-fzf' > "$source/archive/fzf"
   chmod +x "$source/archive/fzf"
@@ -923,6 +923,16 @@ test_install_copies_versioned_quill_package() {
   cmp -s "$ROOT/quill" "$version_dir/quill" || fail "installed quill differs from release source"
   cmp -s "$ROOT/quill.config" "$version_dir/quill.config" || fail "installed config differs from release source"
   cmp -s "$ROOT/VERSION" "$version_dir/VERSION" || fail "installed version differs from release source"
+  local installed_repo="$TMP_ROOT/installed-worktree-repo"
+  make_dirty_repo "$installed_repo"
+  git -C "$installed_repo" config user.email test@example.com
+  git -C "$installed_repo" config user.name 'Install Test'
+  git -C "$installed_repo" add file.txt
+  git -C "$installed_repo" commit -qm Initial
+  "$install_bin/quill" worktree create --branch package-check --from HEAD --no-preview --repo "$installed_repo" >/dev/null
+  "$install_bin/quill" worktree remove package-check --repo "$installed_repo" >/dev/null
+  git -C "$installed_repo" show-ref --verify --quiet refs/heads/package-check || fail 'installed worktree command lost the branch'
+
   [[ ! -e "$install_root/versions/0.2.9" ]] || fail "expected old Quillmit version to be removed"
   [[ -f "$install_root/versions/notes/README" ]] || fail "expected unrecognized install artifact to be preserved"
   [[ ! -e "$install_bin/gcommit" ]] || fail "did not expect gcommit symlink"

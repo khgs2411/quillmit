@@ -25,6 +25,8 @@ class PullRequestFlow(unittest.TestCase):
         self.bin.mkdir()
         (self.package / ".deps/fzf").mkdir(parents=True)
         shutil.copy2(ROOT / "quill", self.package / "quill")
+        (self.package / "scripts").mkdir()
+        shutil.copy2(ROOT / "scripts/worktree", self.package / "scripts/worktree")
         (self.package / "quill.config").write_text("CODEX_FALLBACK_MODEL=\n")
         self.git("init", "-q", "-b", "master", str(self.repo), cwd=self.root)
         self.git("config", "user.name", "TUI Test")

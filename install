@@ -51,7 +51,7 @@ if [[ -z "$VERSION" || "$VERSION" == *[!0-9A-Za-z._-]* ]]; then
   exit 1
 fi
 
-for source_file in quill quill.config VERSION scripts/setup-deps third-party/fzf.lock third-party/fzf.LICENSE; do
+for source_file in quill quill.config VERSION scripts/setup-deps scripts/worktree third-party/fzf.lock third-party/fzf.LICENSE; do
   if [[ ! -f "$SCRIPT_DIR/$source_file" ]]; then
     print -u2 -- "Missing install source: $SCRIPT_DIR/$source_file"
     exit 1
@@ -88,6 +88,8 @@ trap 'rm -rf "$STAGING_DIR"; rm -f "$launcher_tmp"' EXIT
 mkdir -p "$BIN_DIR" "$INSTALL_ROOT/versions"
 
 mkdir "$STAGING_DIR"
+mkdir "$STAGING_DIR/scripts"
+cp "$SCRIPT_DIR/scripts/worktree" "$STAGING_DIR/scripts/worktree"
 cp "$SCRIPT_DIR/quill" "$STAGING_DIR/quill"
 cp "$SCRIPT_DIR/quill.config" "$STAGING_DIR/quill.config"
 cp "$SCRIPT_DIR/VERSION" "$STAGING_DIR/VERSION"
@@ -104,6 +106,7 @@ if [[ -e "$VERSION_DIR" ]]; then
      ! cmp -s "$SCRIPT_DIR/quill" "$VERSION_DIR/quill" || \
      ! cmp -s "$SCRIPT_DIR/quill.config" "$VERSION_DIR/quill.config" || \
      ! cmp -s "$SCRIPT_DIR/VERSION" "$VERSION_DIR/VERSION" || \
+     ! cmp -s "$SCRIPT_DIR/scripts/worktree" "$VERSION_DIR/scripts/worktree" || \
      ! diff -rq "$STAGING_DIR/.deps/fzf" "$VERSION_DIR/.deps/fzf" >/dev/null 2>&1; then
     print -u2 -- "Quillmit $VERSION is already installed with different contents. Bump VERSION before installing changed release bytes."
     exit 1

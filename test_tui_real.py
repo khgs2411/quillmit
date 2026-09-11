@@ -12,11 +12,18 @@ import time
 import unittest
 
 import test_tui
+import test_worktree
 
 
-class RealTerminal(unittest.TestCase):
+class TerminalSession:
+    fixture_type = test_tui.PullRequestFlow
+    initial_text = b"base branch"
+
+    def command_args(self):
+        return ["pr", str(self.fixture.repo)]
+
     def setUp(self):
-        self.fixture = test_tui.PullRequestFlow()
+        self.fixture = self.fixture_type()
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
         dependency = test_tui.ROOT / ".deps/fzf/fzf"
@@ -25,15 +32,16 @@ class RealTerminal(unittest.TestCase):
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
             env = dict(os.environ, TERM="xterm-256color", FLOW_ROOT=str(self.fixture.root),
+                       WT_TEST_ROOT=str(self.fixture.root),
                        PATH=str(self.fixture.bin) + os.pathsep + os.environ["PATH"],
                        FZF_DEFAULT_OPTS="--filter=stable --bind=start:accept")
             os.chdir(self.fixture.root)
             os.execve(str(self.fixture.package / "quill"),
-                      ["quill", "pr", str(self.fixture.repo)], env)
+                      ["quill", *self.command_args()], env)
         self.addCleanup(self.stop)
         fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
         self.output = bytearray()
-        self.wait_text(b"base branch")
+        self.wait_text(self.initial_text)
 
     def stop(self):
         # Closing the controlling terminal also stops its foreground fzf process.
@@ -77,9 +85,13 @@ class RealTerminal(unittest.TestCase):
         self.assertTrue(path.exists(), "Missing " + name)
         return path
 
+
+class RealTerminal(TerminalSession, unittest.TestCase):
     def test_filter_and_keyboard_approval(self):
         self.send(b"stable")
-        self.wait_text(b"stable")
+        # The branch name is also present in the unfiltered list. Wait for the
+        # result count so Enter cannot select the stale first candidate.
+        self.wait_text(b"1/2")
         self.send(b"\r")
         self.wait_text(b"Review pull request")
         self.assertFalse((self.fixture.root / "created").exists())
@@ -109,6 +121,31 @@ class RealTerminal(unittest.TestCase):
         self.send(b"\x03")
         self.wait_text(b"cancelled")
         self.assertFalse((self.fixture.root / "created").exists())
+
+
+class RealWorktreeTerminal(TerminalSession, unittest.TestCase):
+    fixture_type = test_worktree.WorktreeContracts
+    initial_text = b"Review worktree"
+
+    def command_args(self):
+        return ["worktree", "create", "fix retry behavior", "--from", "HEAD", "--repo", str(self.fixture.repo)]
+
+    def test_approve_creates_worktree(self):
+        target = self.fixture.repo / ".worktrees/fix/retries"
+        self.assertFalse(target.exists())
+        self.send(b"\r")
+        self.wait_file(str(target.relative_to(self.fixture.root) / ".git"))
+        self.assertEqual(self.fixture.git("branch", "--show-current", cwd=target), "fix/retries")
+
+    def test_escape_edits_intent_then_cancels(self):
+        self.send(b"\x1b")
+        self.wait_text(b"Task description")
+        self.send(b"revised retry behavior\r")
+        self.wait_text(b"Review worktree")
+        self.send(b"\x03")
+        self.wait_text(b"cancelled")
+        self.assertFalse((self.fixture.repo / ".worktrees").exists())
+        self.assertIn("Task: revised retry behavior", (self.fixture.root / "prompt").read_text())
 
 
 if __name__ == "__main__":

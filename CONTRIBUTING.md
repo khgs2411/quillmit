@@ -18,48 +18,73 @@ performs dependency setup inside its release staging directory.
 ## Verify changes
 
 ```sh
-zsh -n quill
-zsh -n install
-zsh -n deploy
-zsh -n scripts/setup-deps
+./scripts/check
+```
+
+This runs syntax checks, the CLI and release suites, PR and worktree contracts,
+and real fzf terminal tests. It downloads the pinned private fzf binary. It needs
+Python 3.9 or later and pseudo-terminal access. AI and GitHub commands are fake in these
+suites; Git repositories, worktrees, and local bare remotes are real.
+
+For the complete release gate, including real AI usage:
+
+```sh
+./scripts/check --live
+```
+
+The live smoke test uses the checked-out `quill.config` and installed provider CLI.
+It incurs model usage and requires authentication. The current configuration uses
+`gpt-5.3-codex-spark`, with `gpt-5.6-luna` as the usage-limit fallback. It tests a
+real AI-generated branch and worktree, remote-default selection, links, listing,
+local removal, pending and ignored files, locks, active Git operations, upstream
+checks, unpushed commits, and remote failure. Its repositories and remotes are
+temporary. It never pushes to GitHub. It does not force a real provider failure;
+deterministic tests cover fallback and invalid responses.
+
+To also create a live smoke worktree in this checkout:
+
+```sh
+python3 test_worktree_live.py --checkout
+```
+
+This command first runs the isolated live smoke test. It then creates one new
+AI-named worktree here. It checks the links and removal guards, then removes only
+that test's clean worktree and unchanged branch. It leaves the main `.gitignore`
+rule visible. Existing branches and worktrees are not removed. If unexpected work
+appears in the smoke worktree, cleanup stops for inspection.
+
+`deploy` always runs `./scripts/check --live`, including on `--resume`, before
+its isolated install, commit, push, tag, publication, or normal installation.
+A failure stops deployment. Public CI runs `./scripts/check` without live AI;
+contributors do not need provider credentials to run the deterministic suites.
+
+Individual suites remain available:
+
+```sh
 zsh test_quill.sh
 zsh test_release.sh
 python3 test_tui.py
-```
-
-These checks need Python 3 in addition to the installation tools. The suites use
-temporary repositories and fake provider, download, and GitHub commands. They do not call AI services, download dependencies, publish to GitHub,
-or change your normal installation. Release tests use local bare Git remotes.
-
-The failure tests check provider fallback, empty output, batch completeness,
-installation recovery, and release resume boundaries. PR tests preserve Markdown
-and shell literals and check that creation requires approval.
-
-Run the real fzf smoke tests separately:
-
-```sh
-./scripts/setup-deps
+python3 test_worktree.py
 python3 test_tui_real.py
+python3 test_worktree_live.py
 ```
 
-This suite requires pseudo-terminal access. It uses the private fzf binary with
-fake AI and GitHub commands. It checks keyboard filtering, mouse selection,
-approval, and cancellation. Dependency setup downloads the pinned binary.
+The worktree failure tests cover concurrent file and commit changes during fetch,
+diverged history, active Git operations with clean files, and setup failures.
+Also check layout in your own terminal when changing the TUI. Terminal smoke tests
+do not prove visual quality in every terminal.
 
-Also check TUI changes in a real terminal. Verify filtering, keyboard and mouse
-selection, preview scrolling, Esc navigation, and explicit approval. Automated
-boundary tests do not prove the visual layout works in every terminal.
-
-To check a real package without replacing your normal installation:
+To check a package without replacing your normal installation:
 
 ```sh
 ./install --bin-dir ./tmp/install/bin --install-root ./tmp/install/packages
 ./tmp/install/bin/quill --version
 ```
 
-This check downloads the pinned dependency. `tmp/` is ignored. Reusing a version
-with different bytes is refused; remove only this disposable installation before
-repeating the check with changed code.
+This downloads the pinned dependency. `tmp/` is ignored. Reusing a version with
+different bytes is refused; remove only this disposable installation before
+repeating the check with changed code. The end-user installer does not run tests
+or require AI authentication; maintainers must pass the release gate first.
 
 ## Dependencies
 

@@ -7,10 +7,11 @@ usage() {
   cat <<'TEXT'
 Usage: deploy [--patch|--minor|--major|--no-bump | --resume]
 
-Prepare a version (default: patch), verify an isolated installation, commit and
+Prepare a version (default: patch after publication), verify an isolated installation, commit and
 push all changes, wait for CI, create the matching GitHub release, then install
-it locally. If VERSION already differs from HEAD, use that prepared version.
+it locally. Keep VERSION if it is prepared and has no remote tag or release.
 All working-tree changes are included in the release commit.
+Verification includes real terminal and live AI smoke tests using quill.config.
 Use --no-bump to publish the current VERSION without incrementing it.
 Use --resume after a failure to continue the same release without another bump.
 TEXT
@@ -92,7 +93,17 @@ else
   release_commit=""
   current="$(tr -d '[:space:]' < VERSION)"
   committed="$(git show HEAD:VERSION | tr -d '[:space:]')"
-  if [[ "$current" != "$committed" || "$OPTION" == --no-bump ]]; then
+  keep_version=0
+  if [[ -z "$OPTION" && "$current" == "$committed" ]]; then
+    tag="v$current"
+    # A committed version can still be prepared for an upcoming release.
+    # Check the remote authority, not only the working-tree VERSION diff.
+    current_tag="$(remote_tag_commit)"
+    if [[ -z "$current_tag" ]]; then
+      if ! release_exists; then keep_version=1; fi
+    fi
+  fi
+  if [[ "$current" != "$committed" || "$OPTION" == --no-bump || "$keep_version" -eq 1 ]]; then
     [[ -z "$OPTION" || "$OPTION" == --no-bump ]] || fail "VERSION is already prepared; omit the bump flag."
     autoload -Uz is-at-least
     [[ "$current" =~ '^[0-9]+\.[0-9]+\.[0-9]+$' ]] && is-at-least "$committed" "$current" || fail "VERSION must be valid and must not be older than HEAD:VERSION."
@@ -108,7 +119,7 @@ else
   existing_tag="$(remote_tag_commit)"
   [[ -z "$existing_tag" ]] || fail "Remote tag already exists: $tag"
   if release_exists; then fail "GitHub release already exists: $tag"; fi
-  if [[ "$OPTION" == --no-bump && -z "$(git status --porcelain)" ]]; then
+  if [[ ( "$OPTION" == --no-bump || "$keep_version" -eq 1 ) && -z "$(git status --porcelain)" ]]; then
     release_commit="$head"
   fi
   write_state
@@ -123,10 +134,7 @@ fi
 existing_tag="$(remote_tag_commit)"
 [[ -z "$existing_tag" || ( -n "$release_commit" && "$existing_tag" == "$release_commit" ) ]] || fail "Tag $tag does not match this release commit."
 print -- "Verifying Quillmit $release_version for $github_repo..."
-for script in quill install deploy scripts/version scripts/setup-deps test_quill.sh test_release.sh; do zsh -n "$script"; done
-zsh test_quill.sh
-zsh test_release.sh
-python3 test_tui.py
+./scripts/check --live
 ./install --bin-dir "$check_dir/bin" --install-root "$check_dir/packages"
 "$check_dir/bin/quill" --version
 if [[ -z "$release_commit" ]]; then

@@ -29,7 +29,9 @@ installation downloads the pinned fzf binary and checks its recorded checksum.
 
 ## Select the version once
 
-If `VERSION` equals `HEAD:VERSION`, `./deploy` increments the patch version.
+If `VERSION` is already committed but has no remote tag or GitHub release,
+`./deploy` keeps it. A clean checkout releases HEAD directly.
+If that version already has a remote tag or release, `./deploy` increments the patch version.
 Use `--minor` or `--major` for a different increment.
 
 If you already changed `VERSION` to a newer version, run `./deploy` without a
@@ -43,7 +45,7 @@ bump flag. It uses that prepared version. A bump flag with an already changed
 ./deploy --minor
 ```
 
-If the desired version is already committed, use `--no-bump`:
+To require the current version explicitly, use `--no-bump`:
 
 ```sh
 ./deploy --no-bump
@@ -59,8 +61,9 @@ After a failed attempt, use `--resume` without `--no-bump`.
 
 1. Verify the branch, remote identity, remote HEAD, tag, and release availability.
 2. Record the selected version and base commit under `.git/quill-release/pending`.
-3. Write `VERSION`, run syntax checks and the three offline test suites, and verify an isolated
-   installation. These steps do not switch the normal launcher.
+3. Write `VERSION` and run `./scripts/check --live`: syntax, all deterministic
+   suites, real fzf terminal tests, and real AI worktree smoke tests. Then verify
+   an isolated installation. Any failure stops before the normal launcher changes.
 4. Use the checkout's `./quill --add --commit` to commit all working-tree changes.
    With `--no-bump` and a clean checkout, reuse HEAD.
 5. Push that commit explicitly to `origin/master`.
@@ -83,7 +86,7 @@ Fix the reported cause, then use:
 ./deploy --resume
 ```
 
-Resume rechecks the target, package, and CI. It does not bump the version or make
+Resume rechecks the target, full test gate (including paid AI usage), package, and CI. It does not bump the version or make
 another release commit. Before a release commit exists, you can fix working-tree
 files and resume. After it exists, the checkout must be clean at that commit.
 An interruption immediately after the commit can be recovered when HEAD is the

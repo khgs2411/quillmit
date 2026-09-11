@@ -6,3 +6,4 @@ coverage/
 .deps/
 
 __pycache__/
+/.worktrees/

@@ -1,0 +1,26 @@
+#!/bin/zsh
+set -euo pipefail
+ROOT="${0:A:h:h}"
+cd "$ROOT"
+live=0
+case "${1:-}" in
+  '') ;;
+  --live) live=1 ;;
+  -h|--help)
+    print -- 'Usage: scripts/check [--live]'
+    print -- 'Run offline suites and real terminal tests. --live also calls the configured AI provider.'
+    exit 0 ;;
+  *) print -u2 -- 'Usage: scripts/check [--live]'; exit 1 ;;
+esac
+[[ $# -le 1 ]] || { print -u2 -- 'Use only --live.'; exit 1; }
+for script in quill install deploy scripts/version scripts/setup-deps scripts/worktree scripts/check test_quill.sh test_release.sh; do
+  zsh -n "$script"
+done
+zsh test_quill.sh
+zsh test_release.sh
+python3 test_tui.py
+python3 test_worktree.py
+./scripts/setup-deps
+python3 test_tui_real.py
+if [[ "$live" -eq 1 ]]; then python3 test_worktree_live.py; fi
+print -- 'All requested checks passed.'

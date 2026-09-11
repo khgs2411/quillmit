@@ -11,10 +11,19 @@ fixture() {
   cp "$ROOT/deploy" "$CASE/repo/deploy"
   cp "$ROOT/scripts/version" "$CASE/repo/scripts/version"
   print -- '1.2.3' > "$CASE/repo/VERSION"
-  for file in test_quill.sh test_release.sh scripts/setup-deps; do
+  for file in test_quill.sh test_release.sh scripts/setup-deps scripts/worktree; do
     print -r -- '#!/bin/zsh' > "$CASE/repo/$file"
   done
   : > "$CASE/repo/test_tui.py"
+  : > "$CASE/repo/test_worktree.py"
+  cat > "$CASE/repo/scripts/check" <<'SCRIPT'
+#!/bin/zsh
+set -eu
+[[ "$*" == --live ]] || exit 91
+print -- check-all >> "$RELEASE_CASE/events"
+[[ "${FAIL_CHECKS:-0}" == 0 ]] || exit 1
+SCRIPT
+  chmod +x "$CASE/repo/scripts/check"
   cat > "$CASE/repo/quill" <<'SCRIPT'
 #!/bin/zsh
 set -eu
@@ -83,6 +92,7 @@ SCRIPT
   git init -q --bare "$CASE/remote.git"
   git -C "$CASE/repo" remote add origin "$CASE/remote.git"
   git -C "$CASE/repo" push -qu origin master
+  git --git-dir="$CASE/remote.git" update-ref refs/tags/v1.2.3 "$(git -C "$CASE/repo" rev-parse HEAD)"
   cat > "$CASE/remote.git/hooks/pre-receive" <<'SCRIPT'
 #!/bin/sh
 [ "${FAIL_PUSH:-0}" = 0 ]
@@ -103,25 +113,43 @@ fixture prepared
 print -- 1.3.0 > "$CASE/repo/VERSION"
 run_release || { cat "$CASE/output"; fail prepared; }
 [[ "$(cat "$CASE/repo/VERSION")" == 1.3.0 ]] || fail 'prepared version bumped again'
-[[ "$(cat "$CASE/events")" == $'verify-package\ncommit\nci\npublish\ninstall' ]] || fail 'incorrect release ordering'
+[[ "$(cat "$CASE/events")" == $'check-all\nverify-package\ncommit\nci\npublish\ninstall' ]] || fail 'incorrect release ordering'
 [[ ! -f "$CASE/repo/.git/quill-release/pending" ]] || fail 'state not cleared'
 
 fixture committed-version
+git --git-dir="$CASE/remote.git" update-ref -d refs/tags/v1.2.3
 print -- change > "$CASE/repo/release-change"
 run_release --no-bump || { cat "$CASE/output"; fail committed-version; }
 [[ "$(cat "$CASE/repo/VERSION")" == 1.2.3 ]] || fail 'explicit version bumped'
 [[ "$(git --git-dir="$CASE/remote.git" rev-parse refs/tags/v1.2.3)" == "$(git -C "$CASE/repo" rev-parse HEAD)" ]] || fail 'explicit version tag mismatch'
 
 fixture clean-committed-version
+git --git-dir="$CASE/remote.git" update-ref -d refs/tags/v1.2.3
 run_release --no-bump || { cat "$CASE/output"; fail clean-committed-version; }
 [[ "$(count_event commit)" == 0 && "$(count_event publish)" == 1 ]] || fail 'clean committed release made a redundant commit'
 [[ "$(cat "$CASE/repo/VERSION")" == 1.2.3 ]] || fail 'clean committed version bumped'
+
+fixture automatic-prepared-version
+print -- 1.3.0 > "$CASE/repo/VERSION"
+git -C "$CASE/repo" add VERSION
+git -C "$CASE/repo" commit -qm 'Prepare version'
+git -C "$CASE/repo" push -q origin master
+before="$(git -C "$CASE/repo" rev-parse HEAD)"
+run_release || { cat "$CASE/output"; fail automatic-prepared-version; }
+[[ "$(cat "$CASE/repo/VERSION")" == 1.3.0 ]] || fail 'committed prepared version bumped'
+[[ "$(count_event commit)" == 0 && "$(git --git-dir="$CASE/remote.git" rev-parse refs/tags/v1.3.0)" == "$before" ]] || fail 'prepared commit not reused'
 
 fixture preflight
 FAIL_LOOKUP=1 expect_failure
 [[ "$(cat "$CASE/repo/VERSION")" == 1.2.3 ]] || fail 'preflight changed VERSION'
 [[ ! -f "$CASE/repo/.git/quill-release/pending" ]] || fail 'preflight created pending release'
 contains "$(cat "$CASE/output")" 'Could not determine'
+
+fixture check-gate
+FAIL_CHECKS=1 expect_failure
+[[ "$(count_event verify-package)" == 0 && "$(count_event commit)" == 0 && "$(count_event publish)" == 0 && "$(count_event install)" == 0 ]] || fail 'failed checks crossed the release gate'
+run_release --resume || { cat "$CASE/output"; fail check-gate-resume; }
+[[ "$(count_event check-all)" == 2 ]] || fail 'resume skipped full checks'
 
 fixture verification
 FAIL_VERIFY=1 expect_failure
@@ -141,7 +169,7 @@ run_release --resume || { cat "$CASE/output"; fail push-resume; }
 fixture ci
 FAIL_CI=1 expect_failure
 [[ "$(count_event publish)" == 0 && "$(count_event install)" == 0 ]] || fail 'CI failure published or installed'
-[[ -z "$(git --git-dir="$CASE/remote.git" tag)" ]] || fail 'CI failure created tag'
+[[ "$(git --git-dir="$CASE/remote.git" tag)" == v1.2.3 ]] || fail 'CI failure created tag'
 print -- changed > "$CASE/repo/new-file"
 expect_failure --resume
 contains "$(cat "$CASE/output")" 'clean checkout'

@@ -151,13 +151,14 @@ Use `./quill` to run the source checkout. Changes in the checkout do not update
 an installed copy. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and checks.
 
 Maintainers use `./deploy` to commit and publish all working-tree changes.
-It verifies an isolated install, waits for CI, publishes the release, then
+It runs all tests, including live AI smoke tests, verifies an isolated install,
+waits for CI, publishes the release, then
 updates the local installation. `./deploy --resume` continues a failed release.
 See the [release guide](docs/releasing.md) for version selection, prerequisites,
 publication boundaries, and recovery.
 
-If the release version is already committed, `./deploy --no-bump` publishes that
-version. See [the release guide](docs/releasing.md) for version selection and recovery.
+Plain `./deploy` keeps a prepared version, including a committed version with no
+remote tag or GitHub release. `./deploy --no-bump` requires the current version. See [the release guide](docs/releasing.md) for version selection and recovery.
 
 ## Usage
 
@@ -288,6 +289,78 @@ To show the provider transcript while debugging:
 ```sh
 quill --verbose
 ```
+
+## Worktrees
+
+Describe the task to create a linked worktree:
+
+```sh
+quill worktree create "fix retries when PR creation fails"
+quill worktree list
+quill worktree remove fix/pr-retries
+```
+
+Quillmit asks your configured AI provider to propose a branch name and explain
+its choice. It supplies branch names, registered worktrees, and the first 120
+lines of the main root's `AGENTS.md`, when present. Ignored file contents are not
+collected. If an existing linked worktree looks relevant, the preview offers
+**Use existing worktree** and prints its path without changing it.
+
+The preview shows the proposed branch, exact starting commit, and destination.
+Use arrows or a mouse click to select an action, then Enter to approve it.
+Esc edits the task description. Regenerate requests another proposal. Ctrl-C or
+Cancel stops without changing `.gitignore` or creating a branch or worktree.
+Provider options such as `--claude`, `--provider`, and `--config` also apply.
+
+New worktrees live at `<main-worktree>/.worktrees/<branch>`. A branch such as
+`fix/retries` uses nested directories. Calls from a linked worktree still use
+the main checkout's directory. On creation, Quillmit adds `/.worktrees/` to the
+main root's `.gitignore`, creating that file when needed. Existing contents are
+preserved. The change is not staged or committed. Git manages all worktree links.
+The worktree starts with committed files; local edits and ignored files are not copied.
+
+By default, Quillmit fetches the remote's default branch and starts from that
+commit. It uses `origin`, or the only remote. If there are several remotes and no
+`origin`, specify `--remote name`. The new branch does not track the base branch.
+Set its own upstream when you first push it.
+
+For an explicit starting point or a repository without remotes:
+
+```sh
+quill worktree create "fix local import" --from HEAD
+quill worktree create "extend parser" --from feature/parser
+```
+
+`--from` resolves an existing local ref or commit without fetching it. The
+repository must have at least one commit. Bare repository layouts are not supported.
+
+For scripted creation, supply the branch name and approve with `--no-preview`:
+
+```sh
+quill worktree create --branch fix/import --from HEAD --no-preview
+quill worktree list --repo /path/to/project
+```
+
+`--branch` bypasses AI naming. `--no-preview` skips interactive approval; it can
+also be used with an AI task description. `--repo` selects the repository.
+List and remove do not require AI or fzf. List shows cached push status; it does
+not fetch. Use Git to create a worktree for an existing branch; Quillmit creation
+requires a new branch and an unused destination.
+
+Removal accepts a branch name, directory name, or exact registered path. It:
+
+- Refuses the main worktree, foreign worktrees, locked worktrees, and detached HEAD.
+- Refuses staged, unstaged, untracked, and ignored files, and active Git operations.
+- Fetches and verifies the branch's remote upstream when any remote is configured.
+  A missing upstream, missing remote branch, failed fetch, or unpushed commit blocks removal.
+- Allows removal without a remote when the worktree is clean and attached to a local branch.
+- Uses `git worktree remove` and preserves the local branch and its commits.
+
+Ignored files can include `.env` and build directories. Quillmit lists blocking
+paths without reading their contents. Preserve or remove those files explicitly
+before retrying. AI does not override these checks. There is no force-removal flag.
+If you remove the worktree you are currently in, change your shell directory to
+the main checkout afterward; Quillmit cannot change its parent shell's directory.
 
 ## Config
 

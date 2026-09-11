@@ -11,11 +11,17 @@ usage() {
   cat <<'TEXT'
 Usage:
   quill [-a|-c|-p|-f] [--codex|--claude|--gemini|--provider name] [--config file] [--prepare|--commit|--copy|--quit|--add|--push|--full|--verbose|--version] [repo]
+  quill worktree create [intent] [--branch name] [--from ref] [--remote name] [--no-preview] [--repo path]
+  quill worktree list [--repo path]
+  quill worktree remove <name|path> [--repo path]
   quill pr [--remote name] [--base branch] [--no-preview] [--codex|--claude|--gemini|--provider name] [--config file] [--verbose] [repo]
 
 Generate a medium-sized Git commit message, prepare it, then choose an action.
 Use "quill pr" to select a remote base branch and create a pull request.
-Use --remote and --base to skip selection; --no-preview approves creation.
+Use --remote and --base to skip PR selection; --no-preview approves creation.
+Worktree creation also accepts provider flags. --branch supplies a name without AI.
+Use --from for a local starting ref; without a remote, --from is required.
+Worktree removal preserves branches and refuses files or commits at risk.
 TEXT
 }
 
@@ -32,6 +38,11 @@ CONFIG_FILE="$SCRIPT_DIR/quill.config"
 PR_REMOTE_INPUT=""
 PR_BASE_INPUT=""
 PR_NO_PREVIEW=0
+WT_ACTION=""
+WT_INPUT=""
+WT_FROM=""
+WT_BRANCH=""
+WT_REMOTE=""
 
 DEFAULT_PROVIDER=codex
 CODEX_MODEL=gpt-5.3-codex-spark
@@ -46,14 +57,36 @@ CODEX_MAX_PROMPT_BYTES=160000
 CLAUDE_MAX_PROMPT_BYTES=160000
 GEMINI_MAX_PROMPT_BYTES=160000
 
-if [[ "${1:-}" == "pr" ]]; then
+if [[ "${1:-}" == worktree ]]; then
+  WORKFLOW=worktree
+  shift
+  WT_ACTION="${1:-list}"
+  [[ "$WT_ACTION" != --help && "$WT_ACTION" != -h ]] || { usage; exit 0; }
+  [[ $# -eq 0 ]] || shift
+fi
+
+if [[ "$WORKFLOW" == commit && "${1:-}" == "pr" ]]; then
   WORKFLOW="pr"
   shift
 fi
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --from|--branch|--repo)
+      [[ "$WORKFLOW" == worktree && $# -ge 2 && -n "$2" && "$2" != -* ]] || { print -u2 -- "$1 requires a value and is only available with quill worktree."; exit 1; }
+      case "$1" in
+        --from) WT_FROM="$2" ;;
+        --branch) WT_BRANCH="$2" ;;
+        --repo) REPO_INPUT="$2" ;;
+      esac
+      shift 2 ;;
     --remote|--base)
+      if [[ "$WORKFLOW" == worktree && "$1" == --remote ]]; then
+        [[ $# -ge 2 && -n "$2" && "$2" != -* ]] || { print -u2 -- "--remote requires a name."; exit 1; }
+        WT_REMOTE="$2"
+        shift 2
+        continue
+      fi
       if [[ "$WORKFLOW" != "pr" || $# -lt 2 || -z "$2" || "$2" == -* ]]; then
         print -u2 -- "$1 requires a value and is only available with quill pr."
         exit 1
@@ -62,7 +95,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --no-preview)
-      [[ "$WORKFLOW" == "pr" ]] || { print -u2 -- "--no-preview is only available with quill pr."; exit 1; }
+      [[ "$WORKFLOW" == "pr" || "$WORKFLOW" == worktree ]] || { print -u2 -- "--no-preview is only available with quill pr or worktree create."; exit 1; }
       PR_NO_PREVIEW=1
       shift
       ;;
@@ -133,14 +166,19 @@ while [[ $# -gt 0 ]]; do
       exit 0
       ;;
     *)
-      REPO_INPUT="$1"
+      if [[ "$WORKFLOW" == worktree ]]; then
+        [[ "$1" != -* && -z "$WT_INPUT" ]] || { print -u2 -- "Unknown argument: $1. Quote the worktree intent as one argument."; exit 1; }
+        WT_INPUT="$1"
+      else
+        REPO_INPUT="$1"
+      fi
       shift
       ;;
   esac
 done
 
-if [[ "$WORKFLOW" == "pr" && ( "$MODE" != "interactive" || "$ADD_ALL" -eq 1 || "$PUSH_AFTER_COMMIT" -eq 1 ) ]]; then
-  print -u2 -- "Commit workflow flags cannot be combined with quill pr."
+if [[ "$WORKFLOW" != "commit" && ( "$MODE" != "interactive" || "$ADD_ALL" -eq 1 || "$PUSH_AFTER_COMMIT" -eq 1 ) ]]; then
+  print -u2 -- "Commit workflow flags cannot be combined with quill $WORKFLOW."
   exit 1
 fi
 
@@ -213,8 +251,8 @@ provider_max_prompt_bytes() {
 SELECTED_OPTION=""
 FZF="$SCRIPT_DIR/.deps/fzf/fzf"
 
-pr_fzf() {
-  # User fzf defaults must not change selection or bypass PR approval.
+tui_fzf() {
+  # User fzf defaults must not change selection or bypass approval.
   FZF_DEFAULT_OPTS= FZF_DEFAULT_OPTS_FILE= SHELL=/bin/sh "$FZF" \
     --layout=reverse --border=rounded --no-multi "$@"
 }
@@ -230,7 +268,7 @@ select_option() {
     return 1
   fi
 
-  if SELECTED_OPTION="$(print -rl -- "${options[@]}" | pr_fzf \
+  if SELECTED_OPTION="$(print -rl -- "${options[@]}" | tui_fzf \
     --border-label=" Quillmit | $prompt " --prompt='Filter > ' \
     --header=$'Type to filter | Up/Down or click to select\nEnter or double-click: continue | Esc: cancel' \
     --bind='esc:abort,ctrl-c:abort,ctrl-g:abort,double-click:accept')"; then
@@ -363,6 +401,8 @@ REPO="$(git -C "$REPO_INPUT" rev-parse --show-toplevel 2>/dev/null)" || {
 OUTPUT_NAME="commit message"
 if [[ "$WORKFLOW" == "pr" ]]; then
   setup_pr_context
+elif [[ "$WORKFLOW" == worktree ]]; then
+  OUTPUT_NAME="worktree proposal"
 else
   if [[ -z "$(git -C "$REPO" status --short)" ]]; then
     print -- "No changes to commit in $REPO"
@@ -391,7 +431,7 @@ if [[ ! "$MAX_PROMPT_BYTES" =~ '^[0-9]+$' || "$MAX_PROMPT_BYTES" -lt 20000 ]]; t
   exit 1
 fi
 
-if ! command -v "$CLI" >/dev/null 2>&1; then
+if [[ "$WORKFLOW" != worktree || ( "$WT_ACTION" == create && -z "$WT_BRANCH" ) ]] && ! command -v "$CLI" >/dev/null 2>&1; then
   print -u2 -- "$LABEL CLI not found in PATH: $CLI"
   exit 1
 fi
@@ -1060,7 +1100,7 @@ preview_pull_request() {
   local choice result
   # Pass the file through the environment; never put PR content in shell code.
   if choice="$(print -r -- 'Create pull request' | \
-    QUILL_PR_PREVIEW="$PR_PREVIEW_FILE" pr_fzf \
+    QUILL_PR_PREVIEW="$PR_PREVIEW_FILE" tui_fzf \
     --border-label=' Quillmit | Review pull request ' \
     --no-input --info=hidden \
     --header=$'Enter: create PR | Esc: choose another branch | Ctrl-C: cancel\nUp/Down, PgUp/PgDn or mouse wheel: scroll preview' \
@@ -1092,6 +1132,12 @@ create_pull_request() {
     --title "$PR_TITLE" \
     --body-file "$PR_BODY_FILE")
 }
+
+if [[ "$WORKFLOW" == worktree ]]; then
+  source "$SCRIPT_DIR/scripts/worktree"
+  worktree_main
+  exit 0
+fi
 
 if [[ "$WORKFLOW" == "pr" ]]; then
   while true; do

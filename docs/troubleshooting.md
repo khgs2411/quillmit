@@ -101,6 +101,11 @@ Run `quill worktree list` and inspect the reported blocking paths. Commit or
 preserve pending work. Ignored files, including `.env` and build output, also
 block removal. Copy valuable files elsewhere before removing them deliberately.
 
+Without a branch or path, `quill worktree remove` selects the linked worktree
+that contains the current directory. From the main checkout, it stops because
+the main worktree cannot be removed. Use an explicit branch or path to remove a
+different linked worktree.
+
 Complete or resolve active Git operations. Inspect a lock before unlocking it.
 Quillmit does not remove the main checkout or a detached worktree.
 

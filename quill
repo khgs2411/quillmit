@@ -13,7 +13,7 @@ Usage:
   quill [-a|-c|-p|-f] [--codex|--claude|--gemini|--provider name] [--config file] [--prepare|--commit|--copy|--quit|--add|--push|--full|--verbose|--version] [repo]
   quill worktree create [intent] [--branch name] [--from ref] [--remote name] [--no-preview] [--repo path]
   quill worktree list [--repo path]
-  quill worktree remove <name|path> [--repo path]
+  quill worktree remove [name|path] [--repo path]
   quill pr [--remote name] [--base branch] [--no-preview] [--codex|--claude|--gemini|--provider name] [--config file] [--verbose] [repo]
 
 Generate a medium-sized Git commit message, prepare it, then choose an action.
@@ -21,6 +21,7 @@ Use "quill pr" to select a remote base branch and create a pull request.
 Use --remote and --base to skip PR selection; --no-preview approves creation.
 Worktree creation also accepts provider flags. --branch supplies a name without AI.
 Use --from for a local starting ref; without a remote, --from is required.
+Without a removal target, Quillmit selects the current linked worktree.
 Worktree removal preserves branches and refuses files or commits at risk.
 TEXT
 }

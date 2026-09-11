@@ -202,7 +202,7 @@ wt_clean() {
 }
 
 wt_remove() {
-  [[ -n "$WT_INPUT" ]] || wt_fail 'Specify a worktree name or path to remove.'
+  [[ -n "$WT_INPUT" ]] || WT_INPUT="$REPO"
   local target='' branch='' index match=0
   for ((index=1; index<=${#WT_PATHS}; index++)); do
     if [[ "${WT_PATHS[$index]:A}" == "${WT_INPUT:A}" || "${WT_BRANCHES[$index]}" == "$WT_INPUT" || "${WT_PATHS[$index]:t}" == "$WT_INPUT" ]]; then

@@ -28,7 +28,7 @@ The project is Quillmit. The executable is `quill`.
 | Select a PR target and approve the generated content | `quill pr` |
 | Create a worktree from a task description | `quill worktree create "fix parser retries"` |
 | Show registered worktrees and their status | `quill worktree list` |
-| Remove a safe worktree and keep its branch | `quill worktree remove <branch-or-path>` |
+| Remove a safe worktree and keep its branch | `quill worktree remove [branch-or-path]` |
 
 `quill -f` commits and pushes without an approval prompt. Review your changes
 before running it. PR and worktree creation show an approval preview unless you
@@ -326,6 +326,8 @@ Describe the task to create a linked worktree:
 quill worktree create "fix retries when PR creation fails"
 quill worktree list
 quill worktree remove fix/pr-retries
+# From inside a linked worktree:
+quill worktree remove
 ```
 
 Quillmit asks your configured AI provider to propose a branch name and explain
@@ -377,7 +379,10 @@ List and remove do not require AI or fzf. List shows cached push status; it does
 not fetch. Use Git to create a worktree for an existing branch; Quillmit creation
 requires a new branch and an unused destination.
 
-Removal accepts a branch name, directory name, or exact registered path. It:
+Removal accepts a branch name, directory name, or exact registered path. If you
+omit the target, Quillmit selects the linked worktree that contains the current
+directory. With `--repo`, it selects the linked worktree that contains that path.
+The main checkout remains protected. Removal:
 
 - Refuses the main worktree, foreign worktrees, locked worktrees, and detached HEAD.
 - Refuses staged, unstaged, untracked, and ignored files, and active Git operations.

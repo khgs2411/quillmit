@@ -2,8 +2,20 @@
 
 ## Run from source
 
-Clone the repository and use `./quill` from the checkout. Before using its
-interactive PR interface, prepare the private dependency:
+Use zsh, Git, Python 3.9 or later, curl, tar, and a SHA-256 tool (`sha256sum` or
+`shasum`). AI commands also need an authenticated provider CLI; PR creation needs
+an authenticated GitHub CLI. Deterministic tests supply fake provider and GitHub
+commands.
+
+Clone the repository and prepare its private TUI dependency:
+
+```sh
+git clone https://github.com/khgs2411/quillmit.git
+cd quillmit
+```
+
+Use `./quill` to run this checkout. Before using interactive PR or worktree
+creation, run:
 
 ```sh
 ./scripts/setup-deps
@@ -58,7 +70,8 @@ its isolated install, commit, push, tag, publication, or normal installation.
 A failure stops deployment. Public CI runs `./scripts/check` without live AI;
 contributors do not need provider credentials to run the deterministic suites.
 
-Individual suites remain available:
+Individual suites remain available. Run `./scripts/setup-deps` before the real
+terminal suite (`test_tui_real.py`):
 
 ```sh
 zsh test_quill.sh
@@ -93,6 +106,18 @@ To update fzf, change its version and platform checksums in
 Verify the supported macOS and Linux platforms before claiming compatibility.
 Keep the downloaded binary out of Git. Commit the lock file and license.
 
+## Repository layout
+
+| Path | Responsibility |
+| --- | --- |
+| `quill` | CLI parsing, provider calls, commit and PR workflows |
+| `scripts/worktree` | Worktree creation, inspection, and removal checks |
+| `quill.config` | Packaged provider defaults |
+| `scripts/setup-deps`, `third-party/` | Pinned TUI binary and license |
+| `scripts/check`, `test_*` | Verification entry point and suites |
+| `install`, `deploy`, `scripts/version` | Installation, publication, and version selection |
+| `.github/workflows/test.yml` | Deterministic and terminal checks on macOS and Ubuntu |
+
 ## Pull requests
 
 - Keep changes focused and preserve the `quill` command name.
@@ -106,6 +131,10 @@ Use clear titles such as `Add provider selection for Claude and Gemini`.
 Quillmit intentionally avoids conventional prefixes such as `feat:` and `chore:`.
 
 ## Maintainer releases
+
+For command use and recovery, see the [README](README.md) and
+[troubleshooting guide](docs/troubleshooting.md). Report security concerns as
+described in [SECURITY.md](SECURITY.md).
 
 Follow [docs/releasing.md](docs/releasing.md). Installation, source development,
 and GitHub publication are separate actions. Running the tests does not publish.

@@ -1,5 +1,10 @@
 # Push and Full Flags Implementation Plan
 
+> Historical design record from May 2026. The feature is implemented. Code line
+> references and implementation instructions below describe that earlier checkout.
+> Use the [README](../../../README.md), [contributor guide](../../../CONTRIBUTING.md),
+> and [release guide](../../releasing.md) for current behavior and verification.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add `--push` as a push-after-successful-commit modifier and add `--full` as the exact CLI equivalent of `quill --add --commit --push`.
@@ -12,10 +17,10 @@
 
 ## Approved Inputs
 
-- Source issue: [TOP-550](/TOP/issues/TOP-550) asks for a new `--push` flag that runs `git push` and a `--full` flag that runs `quill --add --commit --push`.
+- Source issue: `TOP-550` (historical internal issue) asks for a new `--push` flag that runs `git push` and a `--full` flag that runs `quill --add --commit --push`.
 - Approved design spec: `docs/superpowers/specs/2026-05-19-push-full-flags-design.md`.
 - Design commit: `13f63cb8c3050f352d9ff457455d0f1304bbb5fe`.
-- Vesta design audit: [TOP-552](/TOP/issues/TOP-552), verdict `Ready for Development`.
+- Vesta design audit: `TOP-552` (historical internal issue), verdict `Ready for Development`.
 - Vesta planning constraints to carry forward:
   - Bare `quill --push` is accepted as a post-commit modifier, not a standalone clean-repo push shortcut.
   - Argument-order validation must be explicit so `--prepare --full`, `--full --quit`, and `--copy --push` fail consistently regardless of flag order.

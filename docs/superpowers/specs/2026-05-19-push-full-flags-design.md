@@ -1,9 +1,14 @@
 # Push and Full Flags Design
 
+> Historical design record from May 2026. The feature is implemented. Code line
+> references and implementation instructions below describe that earlier checkout.
+> Use the [README](../../../README.md), [contributor guide](../../../CONTRIBUTING.md),
+> and [release guide](../../releasing.md) for current behavior and verification.
+
 ## Source
 
-- Issue: [TOP-550](/TOP/issues/TOP-550) asks for `--push`, which runs `git push`, and `--full`, equivalent to `quill --add --commit --push`.
-- Design gate issue: [TOP-551](/TOP/issues/TOP-551) asks for a repository-grounded design covering CLI surface, execution order, failure behavior, push guardrails, tests, and verification.
+- Issue: `TOP-550` (historical internal issue) asks for `--push`, which runs `git push`, and `--full`, equivalent to `quill --add --commit --push`.
+- Design gate issue: `TOP-551` (historical internal issue) asks for a repository-grounded design covering CLI surface, execution order, failure behavior, push guardrails, tests, and verification.
 - Existing implementation: `quill` is a single zsh executable with one argument parser (`quill:26-80`), one `MODE` variable (`quill:14`), an `ADD_ALL` modifier (`quill:17`), staged/all-changes context selection (`quill:142-148`), and focused helper functions for provider execution, preparation, copying, and committing (`quill:267-364`).
 - Existing commit behavior: `commit_message` stages only when `ADD_ALL=1`, fails clearly when no staged changes exist, and commits with `git -C "$REPO" commit -F "$MESSAGE_FILE"` (`quill:323-335`).
 - Existing tests: `test_quill.sh` is a shell-only suite built around temporary Git repositories and fake provider CLIs (`test_quill.sh:25-107`), with coverage for staged-only commits, clean commit failure, `--add --commit`, copy behavior, and README-visible workflows (`test_quill.sh:249-383`).

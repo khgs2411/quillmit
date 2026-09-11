@@ -24,7 +24,8 @@ installation downloads the pinned fzf binary and checks its recorded checksum.
 - Install and authenticate the configured AI CLI. The checkout's `./quill`
   generates the release commit message; a global `quill` is not required.
 - Ensure the normal install paths are writable and there is network access.
-- Install Python 3 for the PR workflow tests.
+- Install Python 3.9 or later and provide pseudo-terminal access for terminal tests.
+- Provide zsh, Git, curl, tar, and `sha256sum` or `shasum` for package setup.
 - Verify the feature manually where automated checks are insufficient.
 
 ## Select the version once
@@ -51,7 +52,9 @@ To require the current version explicitly, use `--no-bump`:
 ./deploy --no-bump
 ```
 
-This publishes the current `VERSION`. For this release, it keeps `0.5.0`.
+This publishes the current `VERSION` only when it has no remote tag or release.
+Version `0.5.0` is already published. From that release, plain `./deploy` selects
+`0.5.1`; `./deploy --no-bump` stops because `v0.5.0` already exists.
 If the checkout is clean, it releases HEAD without an extra commit.
 If there are changes, it commits them after verification.
 An existing remote tag or release still blocks a new release attempt.
@@ -65,7 +68,7 @@ After a failed attempt, use `--resume` without `--no-bump`.
    suites, real fzf terminal tests, and real AI worktree smoke tests. Then verify
    an isolated installation. Any failure stops before the normal launcher changes.
 4. Use the checkout's `./quill --add --commit` to commit all working-tree changes.
-   With `--no-bump` and a clean checkout, reuse HEAD.
+   For an unpublished prepared version and a clean checkout, reuse HEAD.
 5. Push that commit explicitly to `origin/master`.
 6. Wait for the `test.yml` push workflow for that exact commit to pass. CI also
    downloads the private dependency and runs the real terminal tests.
@@ -86,9 +89,9 @@ Fix the reported cause, then use:
 ./deploy --resume
 ```
 
-Resume rechecks the target, full test gate (including paid AI usage), package, and CI. It does not bump the version or make
-another release commit. Before a release commit exists, you can fix working-tree
-files and resume. After it exists, the checkout must be clean at that commit.
+Resume rechecks the target, full test gate (including paid AI usage), package,
+and CI. It does not bump the version or make another release commit. Before a
+release commit exists, you can fix working-tree files and resume. After it exists, the checkout must be clean at that commit.
 An interruption immediately after the commit can be recovered when HEAD is the
 single clean child of the recorded base commit.
 
@@ -129,3 +132,17 @@ git rev-parse --path-format=absolute --git-path quill-release/lock
 ```
 
 Normal exits remove this lock automatically. Do not remove a live process's lock.
+
+## Confirm completion
+
+```sh
+quill --version
+git status --short
+```
+
+Check that the command reports the published version and the checkout is clean.
+Inspect the release and its tag on GitHub. Deployment verifies that the tag points
+to the exact commit that passed CI before publication.
+
+For installation and command failures, see [Troubleshooting](troubleshooting.md).
+For test setup, see [Contributing](../CONTRIBUTING.md).

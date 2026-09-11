@@ -1,11 +1,11 @@
 # Quillmit
 
-Terminal-first commit message helper powered by your existing AI subscriptions.
+AI-assisted commits, pull requests, and linked Git worktrees from your terminal.
 
-Quillmit turns your current Git diff into a useful commit message by using the
-AI CLIs you already pay for: Codex by default, with optional Claude Code and
-Gemini CLI support. It stays local, dependency-light, and explicit about when it
-commits.
+Quillmit uses your installed AI CLIs to write commit messages, prepare pull
+requests, and propose worktree branches. Codex is the default provider. Claude
+Code and Gemini CLI are also supported. Git operations run on your machine; AI
+CLIs can send repository context to their provider services.
 
 The command is:
 
@@ -14,6 +14,25 @@ quill
 ```
 
 The project is Quillmit. The executable is `quill`.
+
+[Install or update](#install-or-update) · [Usage](#usage) · [Worktrees](#worktrees) ·
+[Configuration](#config) · [Troubleshooting](docs/troubleshooting.md) ·
+[Contributing](CONTRIBUTING.md) · [Release guide](docs/releasing.md)
+
+## Common commands
+
+| Task | Command |
+| --- | --- |
+| Generate a commit message and choose an action | `quill` |
+| Stage all changes, generate a message, commit, and push | `quill -f` |
+| Select a PR target and approve the generated content | `quill pr` |
+| Create a worktree from a task description | `quill worktree create "fix parser retries"` |
+| Show registered worktrees and their status | `quill worktree list` |
+| Remove a safe worktree and keep its branch | `quill worktree remove <branch-or-path>` |
+
+`quill -f` commits and pushes without an approval prompt. Review your changes
+before running it. PR and worktree creation show an approval preview unless you
+pass `--no-preview`.
 
 ## Features
 
@@ -29,24 +48,27 @@ The project is Quillmit. The executable is `quill`.
 - Copies messages with `pbcopy`, `wl-copy`, `xclip`, or `xsel`.
 - Keeps provider transcripts hidden unless `--verbose` is enabled.
 - Avoids noisy conventional commit prefixes like `feat(scope):` and `chore:`.
-- Has a shell-only test suite with fake provider CLIs.
+- Proposes worktree branches with AI and checks Git state before removal.
+- Includes shell and Python tests, real terminal checks, and optional live AI smoke tests.
 
 ## Requirements
 
-At least one provider CLI must be installed and authenticated:
+Use `zsh` and Git on macOS or Linux. For AI generation, install and authenticate
+at least one provider CLI:
 
 - Codex CLI for the default provider.
 - Claude Code CLI for `--claude`.
 - Gemini CLI for `--gemini`.
 
-Quillmit does not install or authenticate provider CLIs for you.
+Quillmit does not install or authenticate provider CLIs for you. Worktree listing,
+removal, and creation with `--branch` do not require an AI CLI.
 
 The `quill pr` workflow also requires an installed and authenticated GitHub CLI
 (`gh`).
 
 Quillmit manages its own pinned [fzf](https://github.com/junegunn/fzf) dependency
-for the PR interface. The installer downloads the platform binary, checks its
-SHA-256 checksum against `third-party/fzf.lock`, and includes it and its license
+for PR and worktree creation interfaces. The installer downloads the platform
+binary, checks its SHA-256 checksum against `third-party/fzf.lock`, and includes it and its license
 inside the installed Quillmit version. No global fzf installation is required.
 Dependency downloads require `curl`, `tar`, and `sha256sum` or `shasum`.
 The packaged TUI supports macOS and Linux on ARM64 and x86-64.
@@ -56,7 +78,7 @@ The packaged TUI supports macOS and Linux on ARM64 and x86-64.
 | Platform | Status | Notes |
 | --- | --- | --- |
 | macOS | Supported | Uses `pbcopy` for `--copy`. |
-| Linux | Best effort | Uses `wl-copy`, `xclip`, or `xsel` for `--copy`. |
+| Linux | Tested on Ubuntu CI | Uses `wl-copy`, `xclip`, or `xsel` for `--copy`. |
 | Windows | Not supported | WSL may work if provider CLIs and clipboard tools are available. |
 
 ## Demo
@@ -82,13 +104,15 @@ Prepared commit message at /path/to/repo/.git/COMMIT_EDITMSG
 ## Install or update
 
 Install a published version from the [releases page](https://github.com/khgs2411/quillmit/releases/latest).
-Choose its tag, then replace `vX.Y.Z` below with that tag:
+For version `0.5.0`:
 
 ```sh
-git clone --branch vX.Y.Z --depth 1 https://github.com/khgs2411/quillmit.git
+git clone --branch v0.5.0 --depth 1 https://github.com/khgs2411/quillmit.git
 cd quillmit
 ./install
 ```
+
+For another release, replace `v0.5.0` with its published tag.
 
 You can also download and extract **Source code (tar.gz)** from that release,
 then run `./install` in the extracted directory. GitHub releases provide source
@@ -157,8 +181,9 @@ updates the local installation. `./deploy --resume` continues a failed release.
 See the [release guide](docs/releasing.md) for version selection, prerequisites,
 publication boundaries, and recovery.
 
-Plain `./deploy` keeps a prepared version, including a committed version with no
-remote tag or GitHub release. `./deploy --no-bump` requires the current version. See [the release guide](docs/releasing.md) for version selection and recovery.
+Plain `./deploy` keeps an unpublished prepared version. If the current version
+is already published or tagged remotely, it increments the patch version.
+`./deploy --no-bump` requires an unpublished current version.
 
 ## Usage
 
@@ -168,7 +193,8 @@ quill
 
 Run it from a Git repository. Quillmit reads the Git state locally, asks the
 selected provider to write a medium-sized commit message from that context,
-previews it, prepares `.git/COMMIT_EDITMSG`, then asks what to do next.
+previews it, prepares Git's `COMMIT_EDITMSG` file, then asks what to do next.
+Git resolves that file separately for each worktree.
 
 If files are staged, Quillmit generates the message from staged changes only.
 If nothing is staged, it generates from the changed working tree.
@@ -194,7 +220,7 @@ For a specific repo:
 quill /absolute/path/to/repo
 ```
 
-For non-interactive commit after preview:
+To display the generated message and commit without an approval prompt:
 
 ```sh
 quill -c
@@ -217,7 +243,9 @@ of `--full`; both are equivalent to `quill --add --commit --push`.
 
 `-p` is the short form of `--push`. It runs `git push` only after a successful
 local commit. In interactive mode, `quill -p` pushes only if you choose
-`[c]ommit`. Push failures leave the local commit in place.
+`[c]ommit`. Push failures leave the local commit in place. Quillmit uses Git's
+configured push target and does not set an upstream. On a clean working tree, it exits
+without pushing. To retry a failed push, use `git push`.
 
 The equivalent long-form commands remain available:
 
@@ -322,7 +350,9 @@ The worktree starts with committed files; local edits and ignored files are not 
 By default, Quillmit fetches the remote's default branch and starts from that
 commit. It uses `origin`, or the only remote. If there are several remotes and no
 `origin`, specify `--remote name`. The new branch does not track the base branch.
-Set its own upstream when you first push it.
+Set its own upstream when you first push it. For example, from the new worktree,
+use `git push --set-upstream origin HEAD` if `origin` is the intended remote.
+Quillmit prints the worktree path; use `cd` to enter it.
 
 For an explicit starting point or a repository without remotes:
 
@@ -419,15 +449,18 @@ quill --config /path/to/quill.config
 
 By default, provider output is quiet. Failures write details to:
 
-```sh
-~/.cache/quill/last.log
+```text
+${XDG_CACHE_HOME:-$HOME/.cache}/quill/last.log
 ```
 
 If that cache directory is not writable, it falls back to:
 
-```sh
-$TMPDIR/quill/last.log
+```text
+${TMPDIR:-/tmp}/quill/last.log
 ```
+
+See [Troubleshooting](docs/troubleshooting.md) for recovery steps. Before sharing
+logs, follow the [security guidance](SECURITY.md).
 
 ## License
 

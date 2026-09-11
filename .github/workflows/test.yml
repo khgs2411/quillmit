@@ -8,10 +8,17 @@ on:
 
 jobs:
   shell-tests:
-    runs-on: macos-latest
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Install zsh on Linux
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zsh
 
       - name: Syntax check
         run: |
@@ -19,7 +26,18 @@ jobs:
           zsh -n install
           zsh -n deploy
           zsh -n scripts/version
+          zsh -n scripts/setup-deps
           zsh -n test_quill.sh
+          zsh -n test_release.sh
 
       - name: Run tests
-        run: zsh test_quill.sh
+        run: |
+          zsh test_quill.sh
+          zsh test_release.sh
+          python3 test_tui.py
+
+      - name: Prepare private TUI dependency
+        run: ./scripts/setup-deps
+
+      - name: Test real terminal interaction
+        run: python3 test_tui_real.py

@@ -1,0 +1,49 @@
+#!/bin/zsh
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+DESTINATION="${1:-$ROOT/.deps/fzf}"
+LOCK_FILE="$ROOT/third-party/fzf.lock"
+FZF_VERSION="$(awk '$1 == "version" { print $2 }' "$LOCK_FILE")"
+
+case "$(uname -s)" in
+  Darwin) platform=darwin ;;
+  Linux) platform=linux ;;
+  *) print -u2 -- "Quillmit's TUI supports macOS and Linux."; exit 1 ;;
+esac
+case "$(uname -m)" in
+  arm64|aarch64) architecture=arm64 ;;
+  x86_64|amd64) architecture=amd64 ;;
+  *) print -u2 -- "Quillmit's TUI supports ARM64 and x86-64."; exit 1 ;;
+esac
+
+archive="fzf-$FZF_VERSION-${platform}_${architecture}.tar.gz"
+expected="$(awk -v name="$archive" '$2 == name { print $1 }' "$LOCK_FILE")"
+if [[ -z "$expected" ]]; then
+  print -u2 -- "No dependency checksum is recorded for $archive."
+  exit 1
+fi
+
+DOWNLOAD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/quill-deps.XXXXXX")"
+trap 'rm -rf "$DOWNLOAD_DIR"' EXIT
+print -- "Downloading Quillmit dependency: fzf $FZF_VERSION ($platform/$architecture)..."
+curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
+  "https://github.com/junegunn/fzf/releases/download/v$FZF_VERSION/$archive" \
+  --output "$DOWNLOAD_DIR/$archive"
+if command -v sha256sum >/dev/null 2>&1; then
+  actual="$(sha256sum "$DOWNLOAD_DIR/$archive")"
+else
+  actual="$(shasum -a 256 "$DOWNLOAD_DIR/$archive")"
+fi
+if [[ "${actual%% *}" != "$expected" ]]; then
+  print -u2 -- "Checksum mismatch for $archive. Dependency installation stopped."
+  exit 1
+fi
+
+tar -xzf "$DOWNLOAD_DIR/$archive" -C "$DOWNLOAD_DIR" fzf
+chmod 755 "$DOWNLOAD_DIR/fzf"
+mkdir -p "$DESTINATION"
+cp "$ROOT/third-party/fzf.LICENSE" "$DESTINATION/LICENSE"
+cp "$LOCK_FILE" "$DESTINATION/fzf.lock"
+mv -f "$DOWNLOAD_DIR/fzf" "$DESTINATION/fzf"
+print -- "Prepared private fzf dependency at $DESTINATION"

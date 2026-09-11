@@ -238,7 +238,8 @@ test_codex_is_default_and_receives_git_context() {
   assert_contains "$(<"$prompt_capture")" "?? file.txt"
   assert_contains "$(<"$prompt_capture")" "Do not use conventional commit prefixes"
   assert_contains "$(<"$prompt_capture")" "Bad: feat(pipeline): add telemetry"
-  assert_contains "$(<"$args_capture")" "gpt-5.6-luna"
+  local configured_model="$(source "$ROOT/quill.config"; print -r -- "$CODEX_MODEL")"
+  assert_contains "$(<"$args_capture")" "-m $configured_model"
   assert_contains "$(<"$args_capture")" "model_reasoning_effort=low"
   [[ -n "$(git -C "$repo" status --short)" ]] || fail "expected repo to remain dirty"
 }
@@ -393,6 +394,22 @@ test_single_oversized_file_splits_across_batches() {
   summary_count="$(grep -l "Summarize this portion" "$captures"/* | wc -l | tr -d ' ')"
   [[ "$summary_count" -gt 1 ]] || fail "expected one oversized file to span multiple summary invocations"
   grep -q "File: large.txt (part" "$captures"/* || fail "expected oversized file parts in summary prompts"
+  python3 - "$captures" "$repo" <<'CHECK'
+import pathlib, re, subprocess, sys
+parts = {}
+for prompt in pathlib.Path(sys.argv[1]).glob('*'):
+    text = prompt.read_text()
+    if not text.startswith('Summarize this portion'):
+        continue
+    for match in re.finditer(r'--- File: large.txt \(part (\d+)\) ---\n(.*?)(?=\n--- File:|\Z)', text, re.S):
+        payload = match[2]
+        # Each part repeats the Git file header. Keep the hunk bytes only.
+        payload = payload.split('+++ b/large.txt\n', 1)[1]
+        parts[int(match[1])] = payload
+original = subprocess.check_output(['git', '-C', sys.argv[2], 'diff', '--cached', '--', 'large.txt']).decode()
+expected = original.split('+++ b/large.txt\n', 1)[1]
+assert ''.join(parts[key] for key in sorted(parts)) == expected, 'batch content differs from the source diff'
+CHECK
 }
 
 test_batch_budget_is_selected_per_provider() {
@@ -653,17 +670,16 @@ test_pr_flow_uses_selected_base_and_generated_content() {
   local gh_body_capture="$TMP_ROOT/pr-gh-body.md"
   local output
   output="$(
-    print 2 | \
-      QUILL_STDIN_CAPTURE="$prompt_capture" \
+    QUILL_STDIN_CAPTURE="$prompt_capture" \
       GH_ARGS_CAPTURE="$gh_args_capture" \
       GH_BODY_CAPTURE="$gh_body_capture" \
       GH_SIMULATE_PUSH=1 \
       GH_REPO_PATH="$repo" \
       PATH="$(make_fake_bin):$PATH" \
-      "$ROOT/quill" pr "$repo"
+      "$ROOT/quill" pr --remote origin --base develop --no-preview "$repo"
   )"
 
-  assert_contains "$output" "Select the pull request base branch"
+  assert_not_contains "$output" "Select the pull request base branch"
   assert_contains "$output" "Creating pull request from feature into test/repo:develop"
   assert_contains "$output" "https://github.com/test/repo/pull/1"
   assert_not_contains "$output" "Generated pull request"
@@ -817,7 +833,66 @@ test_readme_documents_push_and_full_flags() {
   assert_contains "$readme" "Push failures leave the local commit in place."
 }
 
+# Exercise dependency packaging without downloading or trusting a host fzf.
+make_install_source() {
+  local source="$1"
+  mkdir -p "$source/scripts" "$source/third-party" "$source/fake-bin" "$source/archive"
+  cp "$ROOT/quill" "$ROOT/quill.config" "$ROOT/VERSION" "$ROOT/install" "$source/"
+  cp "$ROOT/scripts/setup-deps" "$source/scripts/"
+  cp "$ROOT/third-party/fzf.LICENSE" "$source/third-party/"
+  print -rl -- '#!/bin/sh' 'echo fixture-fzf' > "$source/archive/fzf"
+  chmod +x "$source/archive/fzf"
+  tar -czf "$source/fzf.tar.gz" -C "$source/archive" fzf
+  local checksum="$(shasum -a 256 "$source/fzf.tar.gz")"
+  {
+    print -- 'version 0.74.3'
+    local target
+    for target in darwin_arm64 darwin_amd64 linux_arm64 linux_amd64; do
+      print -- "${checksum%% *}  fzf-0.74.3-$target.tar.gz"
+    done
+  } > "$source/third-party/fzf.lock"
+  cat > "$source/fake-bin/curl" <<'SCRIPT'
+#!/bin/zsh
+set -eu
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == --output ]]; then cp "${0:A:h:h}/fzf.tar.gz" "$2"; exit 0; fi
+  shift
+done
+exit 1
+SCRIPT
+  chmod +x "$source/fake-bin/curl"
+}
+
+test_pr_scripted_validation() {
+  local repo="$TMP_ROOT/pr-validation"
+  make_pr_repo "$repo" "$TMP_ROOT/pr-validation.git"
+  local bin="$(make_fake_bin)" output
+  for invalid in remote base; do
+    if output="$(PATH="$bin" "$ROOT/quill" pr --remote origin --base develop --no-preview --$invalid missing "$repo" 2>&1)"; then
+      fail "expected invalid PR $invalid to fail"
+    fi
+    assert_contains "$output" "Unknown"
+  done
+  if output="$(PATH="$bin" "$ROOT/quill" pr --base develop "$repo" 2>&1)"; then
+    fail "expected approval to require a terminal"
+  fi
+  assert_contains "$output" "--no-preview"
+  git -C "$repo" remote add second "$TMP_ROOT/pr-validation.git"
+  if output="$(PATH="$bin" "$ROOT/quill" pr --base develop --no-preview "$repo" 2>&1)"; then
+    fail "expected ambiguous remote to require selection"
+  fi
+  assert_contains "$output" "--remote"
+  for invalid in --base --remote; do
+    if "$ROOT/quill" pr "$invalid" > /dev/null 2>&1; then fail "expected missing argument rejection"; fi
+  done
+  if "$ROOT/quill" --no-preview "$repo" >/dev/null 2>&1; then fail "expected PR-only flag rejection"; fi
+}
+
 test_install_copies_versioned_quill_package() {
+  local source="$TMP_ROOT/install-source"
+  make_install_source "$source"
+  local ROOT="$source"
+  local -x PATH="$source/fake-bin:$PATH"
   local install_bin="$TMP_ROOT/install-bin"
   local install_root="$TMP_ROOT/install root"
   mkdir -p "$install_bin"
@@ -831,7 +906,7 @@ test_install_copies_versioned_quill_package() {
   ln -s "/Users/liadgoren/Repositories/quill/quill" "$install_bin/quill"
 
   local output
-  output="$("$ROOT/install" --bin-dir "$install_bin" --install-root "$install_root" 2>&1)"
+  output="$("$ROOT/install" --bin-dir "$install_bin" --install-root "$install_root" 2>&1)" || fail "$output"
 
   local version
   version="$(<"$ROOT/VERSION")"
@@ -860,7 +935,29 @@ test_install_copies_versioned_quill_package() {
     fail "expected changed bytes for an installed version to be refused"
   fi
   assert_contains "$(<"$failure")" "Bump VERSION before installing changed release bytes"
+  local relative="$TMP_ROOT/relative-install"
+  mkdir -p "$relative"
+  mkdir -p "$relative/bin"
+  ln -s "$relative/unrelated-command" "$relative/bin/gcommit"
+  (cd "$relative" && "$ROOT/install" --bin-dir bin --install-root packages) >/dev/null 2>&1
+  [[ -L "$relative/bin/gcommit" ]] || fail "unowned gcommit was removed"
+  assert_equals "$(cd / && "$relative/bin/quill" --version)" "quill $version"
+  # Reject an unowned launcher before downloading or creating a release package.
+  mkdir -p "$TMP_ROOT/unowned/bin"
+  print -- keep > "$TMP_ROOT/unowned/bin/quill"
+  if "$ROOT/install" --bin-dir "$TMP_ROOT/unowned/bin" --install-root "$TMP_ROOT/unowned/packages" >/dev/null 2>&1; then
+    fail "expected unowned launcher rejection"
+  fi
+  [[ ! -e "$TMP_ROOT/unowned/packages" ]] || fail "unowned launcher caused package writes"
+  assert_equals "$(cat "$TMP_ROOT/unowned/bin/quill")" keep
+  # A failed download checksum must not switch the current launcher.
+  print -- corrupted > "$source/fzf.tar.gz"
+  if "$ROOT/install" --bin-dir "$relative/bin" --install-root "$relative/packages" >/dev/null 2>&1; then
+    fail "expected checksum failure"
+  fi
+  assert_equals "$(cd / && "$relative/bin/quill" --version)" "quill $version"
 }
+
 
 test_version_script_supports_semantic_bumps() {
   local sandbox="$TMP_ROOT/version-script"
@@ -910,6 +1007,125 @@ test_deploy_help_documents_release_boundary() {
   assert_contains "$output" "create the matching GitHub release"
 }
 
+
+# Provider failures must preserve the index and history. A usage-limit failure
+# permits one configured fallback; ordinary failures and empty output do not.
+test_provider_failure_contracts() {
+  local bin="$TMP_ROOT/provider-bin" config="$TMP_ROOT/provider.config"
+  mkdir -p "$bin"
+  cat > "$bin/codex" <<'SCRIPT'
+#!/bin/zsh
+set -eu
+model='' out=''
+while (( $# )); do
+  case "$1" in
+    -m) model="$2"; shift 2 ;;
+    -o) out="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+prompt="$(cat)"
+print -r -- "$model" >> "$CALLS"
+case "$BEHAVIOR" in
+  error) print -u2 -- 'connection failed'; exit 1 ;;
+  empty) : > "$out"; exit 0 ;;
+  limit|fallback-error)
+    if [[ "$model" == primary ]]; then
+      print -u2 -- "ERROR: You've hit your usage limit for primary"; exit 1
+    fi
+    [[ "$BEHAVIOR" != fallback-error ]] || exit 1 ;;
+  batch-error)
+    [[ "$prompt" != *'Generate one git commit message from summaries'* ]] || touch "$SYNTHESIS"
+    [[ "$prompt" != *'Summarize this portion'* ]] || exit 1 ;;
+esac
+print -r -- 'Successful generated message' > "$out"
+SCRIPT
+  chmod +x "$bin/codex"
+  local scenario fallback repo before index calls
+  for scenario in error empty limit fallback-error batch-error success; do
+    for fallback in '' secondary; do
+      repo="$TMP_ROOT/provider-$scenario-${fallback:-none}"
+      make_pr_repo "$repo" "$repo.git"
+      print -- pending > "$repo/pending"
+      if [[ "$scenario" == batch-error ]]; then
+        write_large_file "$repo/large" 'batch data' 700
+      fi
+      git -C "$repo" add -A
+      before="$(git -C "$repo" rev-parse HEAD)"
+      index="$(git -C "$repo" write-tree)"
+      print -rl -- 'CODEX_MODEL=primary' "CODEX_FALLBACK_MODEL=$fallback" 'CODEX_MAX_PROMPT_BYTES=20000' > "$config"
+      calls="$repo.calls"
+      if BEHAVIOR="$scenario" CALLS="$calls" SYNTHESIS="$repo.synthesis" PATH="$bin:$PATH" \
+        "$ROOT/quill" --config "$config" --commit "$repo" > "$repo.output" 2>&1; then
+        [[ "$scenario" == success || ( "$scenario" == limit && -n "$fallback" ) ]] || fail "unexpected provider success: $scenario"
+        assert_equals "$(git -C "$repo" log -1 --pretty=%s)" 'Successful generated message'
+      else
+        [[ "$scenario" != success && ! ( "$scenario" == limit && -n "$fallback" ) ]] || fail "unexpected provider failure: $scenario"
+        assert_equals "$(git -C "$repo" rev-parse HEAD)" "$before"
+        assert_equals "$(git -C "$repo" write-tree)" "$index"
+      fi
+      [[ ! -e "$repo.synthesis" ]] || fail 'failed batches reached synthesis'
+      if [[ "$scenario" != batch-error ]]; then
+        local expected=primary
+        if [[ ( "$scenario" == limit || "$scenario" == fallback-error ) && -n "$fallback" ]]; then
+          expected=$'primary\nsecondary'
+        fi
+        assert_equals "$(cat "$calls")" "$expected"
+      fi
+    done
+  done
+}
+
+test_dependency_failures_preserve_installation() {
+  local source="$TMP_ROOT/dependency-source" target="$TMP_ROOT/dependency-target"
+  make_install_source "$source"
+  local -x PATH="$source/fake-bin:$PATH"
+  "$source/install" --bin-dir "$target/bin" --install-root "$target/packages" >/dev/null
+  local launcher="$(cat "$target/bin/quill")" version="$("$target/bin/quill" --version)"
+  cp "$source/fzf.tar.gz" "$source/good.tar.gz"
+  cp "$source/third-party/fzf.lock" "$source/good.lock"
+  print -- '99.0.0' > "$source/VERSION"
+  local failure
+  for failure in download checksum archive; do
+    cp "$source/good.tar.gz" "$source/fzf.tar.gz"
+    cp "$source/good.lock" "$source/third-party/fzf.lock"
+    case "$failure" in
+      download) rm "$source/fzf.tar.gz" ;;
+      checksum) print -- corrupted > "$source/fzf.tar.gz" ;;
+      archive)
+        print -- 'not an archive' > "$source/fzf.tar.gz"
+        local checksum="$(shasum -a 256 "$source/fzf.tar.gz")"
+        awk -v sum="${checksum%% *}" 'NR == 1 {print; next} {$1=sum; print}' "$source/good.lock" > "$source/third-party/fzf.lock" ;;
+    esac
+    if "$source/install" --bin-dir "$target/bin" --install-root "$target/packages" > "$target/output" 2>&1; then
+      fail "accepted $failure failure"
+    fi
+    assert_equals "$(cat "$target/bin/quill")" "$launcher"
+    assert_equals "$(cd / && "$target/bin/quill" --version)" "$version"
+    [[ ! -d "$target/packages/versions/99.0.0" ]] || fail 'failed dependency installed a release'
+  done
+}
+
+test_git_paths_and_change_types() {
+  local repo="$TMP_ROOT/path repo" capture="$TMP_ROOT/path-prompt"
+  make_pr_repo "$repo" "$TMP_ROOT/path-remote.git"
+  git -C "$repo" mv file.txt 'renamed file.txt'
+  rm "$repo/feature.txt"
+  print -- 'unicode content marker' > "$repo/café notes.txt"
+  printf '\000\001\002' > "$repo/binary.dat"
+  local output
+  output="$(QUILL_STDIN_CAPTURE="$capture" PATH="$(make_fake_bin)" "$ROOT/quill" --add --commit "$repo")"
+  assert_contains "$(cat "$capture")" 'unicode content marker'
+  assert_contains "$(cat "$capture")" 'renamed file.txt'
+  assert_contains "$(cat "$capture")" 'binary.dat'
+  assert_equals "$(git -C "$repo" status --porcelain)" ''
+  [[ -f "$repo/café notes.txt" && -f "$repo/renamed file.txt" && ! -f "$repo/feature.txt" ]] || fail 'incorrect committed file set'
+}
+
+test_provider_failure_contracts
+test_dependency_failures_preserve_installation
+test_git_paths_and_change_types
+
 test_clean_repo_reports_no_changes
 test_codex_is_default_and_receives_git_context
 test_default_prepares_and_prompts_for_action
@@ -937,6 +1153,7 @@ test_full_stages_commits_and_pushes_all_changes
 test_short_flags_match_long_workflows
 test_pr_flow_uses_selected_base_and_generated_content
 test_pr_rejects_commit_workflow_flags
+test_pr_scripted_validation
 test_push_does_not_run_when_commit_has_no_staged_changes
 test_push_failure_leaves_local_commit
 test_interactive_push_pushes_only_after_commit_choice

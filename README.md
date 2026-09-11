@@ -24,7 +24,7 @@ The project is Quillmit. The executable is `quill`.
 - Stages all changes immediately when `--add` or `--full` is passed.
 - Commits only staged changes.
 - Provides `-a`, `-c`, `-p`, and `-f` aliases for common commit workflows.
-- Creates AI-written pull requests with interactive remote base-branch selection.
+- Creates AI-written pull requests with searchable branch selection and approval previews.
 - Prepares `.git/COMMIT_EDITMSG` by default.
 - Copies messages with `pbcopy`, `wl-copy`, `xclip`, or `xsel`.
 - Keeps provider transcripts hidden unless `--verbose` is enabled.
@@ -43,6 +43,13 @@ Quillmit does not install or authenticate provider CLIs for you.
 
 The `quill pr` workflow also requires an installed and authenticated GitHub CLI
 (`gh`).
+
+Quillmit manages its own pinned [fzf](https://github.com/junegunn/fzf) dependency
+for the PR interface. The installer downloads the platform binary, checks its
+SHA-256 checksum against `third-party/fzf.lock`, and includes it and its license
+inside the installed Quillmit version. No global fzf installation is required.
+Dependency downloads require `curl`, `tar`, and `sha256sum` or `shasum`.
+The packaged TUI supports macOS and Linux on ARM64 and x86-64.
 
 ## Compatibility
 
@@ -72,73 +79,85 @@ Prepared commit message at /path/to/repo/.git/COMMIT_EDITMSG
 [c]ommit, [e]dit, co[p]y, [r]egenerate, [q]uit:
 ```
 
-## Install
+## Install or update
 
-Clone the repository and run the installer:
+Install a published version from the [releases page](https://github.com/khgs2411/quillmit/releases/latest).
+Choose its tag, then replace `vX.Y.Z` below with that tag:
 
 ```sh
-git clone https://github.com/khgs2411/quillmit.git
+git clone --branch vX.Y.Z --depth 1 https://github.com/khgs2411/quillmit.git
 cd quillmit
 ./install
 ```
 
-The installer copies the release into
-`~/.local/share/quillmit/versions/<version>/` and writes an owned launcher at
-`~/.local/bin/quill`. It does not create a symlink or keep the command coupled
-to the checkout. Re-running the installer repairs the launcher; installing
-different bytes under an existing version is refused so releases remain
-immutable. After the launcher switches successfully, the installer removes all
-older recognized Quillmit version directories. Unrecognized content in a
-custom install root is preserved with a warning rather than deleted.
+You can also download and extract **Source code (tar.gz)** from that release,
+then run `./install` in the extracted directory. GitHub releases provide source
+archives; the installer downloads the pinned fzf binary for your platform.
+You need `zsh`, `git`, `curl`, `tar`, and `sha256sum` or `shasum`.
 
-Make sure `~/.local/bin` is on your `PATH`.
-
-Confirm the installed release with:
+The installer creates a private package at
+`${XDG_DATA_HOME:-~/.local/share}/quillmit/versions/<version>/` and a launcher at
+`~/.local/bin/quill`. The command works independently of the source checkout.
+Add the launcher directory to your shell's `PATH` if needed:
 
 ```sh
+export PATH="$HOME/.local/bin:$PATH"
 quill --version
 ```
 
-## Versioning And Deployment
+Put the `export` line in `~/.zshrc` to keep it for future zsh sessions.
 
-Versioning, installation, and deployment are separate operations:
+To update, download or clone the new release into a new directory and run its
+installer. The installer verifies the dependency checksum before it switches
+the launcher. It then removes older recognized Quillmit packages. It preserves
+unrecognized directories. Keep personal configuration outside the packages;
+see [Configuration](#config).
 
-- `scripts/version` changes the repository's `VERSION` only.
-- `install` installs exactly the declared `VERSION` locally and never changes it.
-- `deploy` coordinates a version bump, verification, local installation,
-  Quillmit commit/push, GitHub Actions, and the matching GitHub release.
+Reinstalling the same release repairs its launcher. If installed files differ,
+the installer stops instead of overwriting them. Every install currently needs
+network access for dependency verification, including a reinstall.
 
-The version script defaults to a patch increment:
-
-```sh
-./scripts/version          # 0.3.0 -> 0.3.1
-./scripts/version --patch  # 0.3.0 -> 0.3.1
-./scripts/version --minor  # 0.3.0 -> 0.4.0
-./scripts/version --major  # 0.3.0 -> 1.0.0
-```
-
-To version and install a local build without publishing it:
+Custom locations, including relative paths, are supported:
 
 ```sh
-./scripts/version  # or --minor / --major
-./install
-quill --version
+./install --bin-dir /path/on/PATH --install-root /path/for/quillmit-packages
 ```
 
-Deployment uses the same version script and also defaults to a patch release:
+The installer refuses to replace a command that it does not recognize as a
+Quillmit launcher. Resolve that conflict before installing. A failed install
+leaves the existing launcher in place; fix the reported cause and run it again.
+
+## Uninstall or return to an older release
+
+For the default locations, first confirm that the following paths contain your
+Quillmit launcher and packages. Then remove them:
 
 ```sh
-./deploy          # patch release
-./deploy --patch
-./deploy --minor
-./deploy --major
+rm "$HOME/.local/bin/quill"
+rm -r "${XDG_DATA_HOME:-$HOME/.local/share}/quillmit"
 ```
 
-Deployments must run from `master` while it matches `origin/master`. The deploy
-script publishes every working-tree change, so review the complete diff first.
-It requires authenticated `gh` and the selected provider CLI. It stops before
-creating the GitHub release if local verification, push, or GitHub Actions
-fails.
+For a custom installation, use the paths passed to `--bin-dir` and
+`--install-root`. Personal configuration and logs are separate and remain in
+place. Remove any shell alias you created for Quillmit.
+
+To return to an older release, download that release and run its installer.
+Older installers may have different dependency requirements. The current
+installer does not retain previous packages for offline rollback.
+
+## Development and releases
+
+Use `./quill` to run the source checkout. Changes in the checkout do not update
+an installed copy. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and checks.
+
+Maintainers use `./deploy` to commit and publish all working-tree changes.
+It verifies an isolated install, waits for CI, publishes the release, then
+updates the local installation. `./deploy --resume` continues a failed release.
+See the [release guide](docs/releasing.md) for version selection, prerequisites,
+publication boundaries, and recovery.
+
+If the release version is already committed, `./deploy --no-bump` publishes that
+version. See [the release guide](docs/releasing.md) for version selection and recovery.
 
 ## Usage
 
@@ -213,9 +232,33 @@ To create a pull request:
 quill pr
 ```
 
-Quillmit fetches the selected remote, lets you select its base branch, and
-generates a title and Markdown description from the committed `base...HEAD`
-changes. It then calls `gh pr create`, assigns the pull request to you, and lets
+Quillmit fetches the selected remote and opens a searchable base-branch list.
+Type to filter the branches. Use the arrow keys or click to select a branch,
+then press Enter or double-click to continue. Press Esc to cancel.
+
+Quillmit generates a title and Markdown description from the committed
+`base...HEAD` changes, then shows a scrollable preview with the source and target.
+Use the arrow keys, Page Up/Page Down, or the mouse wheel to scroll. Press Enter
+to approve and create the PR. Press Esc to choose another branch and generate
+new content. Press Ctrl-C to cancel. This workflow requires an interactive
+terminal when selection or approval is needed. Piped numeric selections are
+not supported.
+
+For scripted use, provide the target and explicitly skip approval:
+
+```sh
+quill pr --remote origin --base master --no-preview
+```
+
+`--base` skips branch selection. `--remote` skips remote selection; it is optional
+when the repository has only one remote. `--no-preview` approves PR creation
+without displaying the preview. Omit it to review the generated content in the
+TUI. Fully scripted use does not require a terminal or fzf. The branch must exist
+on the selected remote and have commits to compare with the current branch.
+If you press Esc from a preview, branch selection opens even when `--base` was
+provided. Provider flags and the optional repository path work in both modes.
+
+After approval, Quillmit calls `gh pr create`, assigns the pull request to you, and lets
 GitHub CLI push or fork the head branch when necessary. Uncommitted changes are
 not included. Provider and configuration flags remain available, for example
 `quill pr --claude` or `quill pr --config /path/to/quill.config`.
@@ -248,14 +291,31 @@ quill --verbose
 
 ## Config
 
-Edit `quill.config`:
+Quillmit loads the `quill.config` beside the executable. An installed release
+has its own copy. Editing the source checkout does not change that copy.
+
+For personal settings, copy the configuration outside the release package and
+pass its path explicitly:
+
+```sh
+mkdir -p "$HOME/.config/quillmit"
+cp quill.config "$HOME/.config/quillmit/quill.config"
+quill --config "$HOME/.config/quillmit/quill.config"
+```
+
+Run the copy command from a source checkout or extracted release. Edit the
+personal file after copying it. Do not repeat the copy when updating Quillmit,
+since that would overwrite your settings. Configuration files contain shell
+assignments and are executed by zsh; use files you trust.
+
+Example configuration:
 
 ```sh
 DEFAULT_PROVIDER=codex
 
-CODEX_MODEL=gpt-5.6-luna
+CODEX_MODEL=gpt-5.3-codex-spark
 CODEX_REASONING_EFFORT=low
-CODEX_FALLBACK_MODEL=
+CODEX_FALLBACK_MODEL=gpt-5.6-luna
 CODEX_FALLBACK_REASONING_EFFORT=low
 CLAUDE_MODEL=haiku
 CLAUDE_FALLBACK_MODEL=haiku
@@ -296,22 +356,6 @@ If that cache directory is not writable, it falls back to:
 $TMPDIR/quill/last.log
 ```
 
-## Development
-
-```sh
-zsh test_quill.sh
-```
-
-The tests use fake provider CLIs and do not call real AI services.
-
 ## License
 
 MIT. See [LICENSE](LICENSE).
-
-## Local Install From This Checkout
-
-If you are developing Quillmit locally:
-
-```sh
-./install --bin-dir /path/on/PATH --install-root /path/for/versioned/packages
-```

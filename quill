@@ -11,10 +11,11 @@ usage() {
   cat <<'TEXT'
 Usage:
   quill [-a|-c|-p|-f] [--codex|--claude|--gemini|--provider name] [--config file] [--prepare|--commit|--copy|--quit|--add|--push|--full|--verbose|--version] [repo]
-  quill pr [--codex|--claude|--gemini|--provider name] [--config file] [--verbose] [repo]
+  quill pr [--remote name] [--base branch] [--no-preview] [--codex|--claude|--gemini|--provider name] [--config file] [--verbose] [repo]
 
 Generate a medium-sized Git commit message, prepare it, then choose an action.
 Use "quill pr" to select a remote base branch and create a pull request.
+Use --remote and --base to skip selection; --no-preview approves creation.
 TEXT
 }
 
@@ -28,6 +29,9 @@ FULL_REQUESTED=0
 NON_COMMIT_MODE_FLAGS=""
 PROVIDER=""
 CONFIG_FILE="$SCRIPT_DIR/quill.config"
+PR_REMOTE_INPUT=""
+PR_BASE_INPUT=""
+PR_NO_PREVIEW=0
 
 DEFAULT_PROVIDER=codex
 CODEX_MODEL=gpt-5.3-codex-spark
@@ -49,6 +53,19 @@ fi
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --remote|--base)
+      if [[ "$WORKFLOW" != "pr" || $# -lt 2 || -z "$2" || "$2" == -* ]]; then
+        print -u2 -- "$1 requires a value and is only available with quill pr."
+        exit 1
+      fi
+      if [[ "$1" == "--remote" ]]; then PR_REMOTE_INPUT="$2"; else PR_BASE_INPUT="$2"; fi
+      shift 2
+      ;;
+    --no-preview)
+      [[ "$WORKFLOW" == "pr" ]] || { print -u2 -- "--no-preview is only available with quill pr."; exit 1; }
+      PR_NO_PREVIEW=1
+      shift
+      ;;
     --prepare)
       MODE="prepare"
       NON_COMMIT_MODE_FLAGS="${NON_COMMIT_MODE_FLAGS:+$NON_COMMIT_MODE_FLAGS }--prepare"
@@ -194,37 +211,39 @@ provider_max_prompt_bytes() {
 }
 
 SELECTED_OPTION=""
+FZF="$SCRIPT_DIR/.deps/fzf/fzf"
+
+pr_fzf() {
+  # User fzf defaults must not change selection or bypass PR approval.
+  FZF_DEFAULT_OPTS= FZF_DEFAULT_OPTS_FILE= SHELL=/bin/sh "$FZF" \
+    --layout=reverse --border=rounded --no-multi "$@"
+}
 
 select_option() {
   local prompt="$1"
   shift
   local -a options=("$@")
-  local selection
-  local index
+  local result
 
   if [[ "${#options[@]}" -eq 0 ]]; then
     print -u2 -- "No options are available for $prompt."
     return 1
   fi
 
-  print -- "$prompt"
-  for ((index = 1; index <= ${#options[@]}; index++)); do
-    print -- "  $index) ${options[$index]}"
-  done
-
-  while true; do
-    print -n -- "Selection [1]: "
-    if ! read -r selection; then
-      print -u2 -- "A selection is required."
-      return 1
+  if SELECTED_OPTION="$(print -rl -- "${options[@]}" | pr_fzf \
+    --border-label=" Quillmit | $prompt " --prompt='Filter > ' \
+    --header=$'Type to filter | Up/Down or click to select\nEnter or double-click: continue | Esc: cancel' \
+    --bind='esc:abort,ctrl-c:abort,ctrl-g:abort,double-click:accept')"; then
+    return 0
+  else
+    result=$?
+    if [[ "$result" -eq 130 ]]; then
+      print -- "Pull request cancelled."
+      exit 0
     fi
-    selection="${selection:-1}"
-    if [[ "$selection" =~ '^[0-9]+$' && "$selection" -ge 1 && "$selection" -le "${#options[@]}" ]]; then
-      SELECTED_OPTION="${options[$selection]}"
-      return 0
-    fi
-    print -- "Choose a number from 1 to ${#options[@]}."
-  done
+    print -u2 -- "Branch selection failed (exit $result)."
+    return "$result"
+  fi
 }
 
 select_pr_base() {
@@ -235,7 +254,13 @@ select_pr_base() {
     return 1
   fi
 
-  if [[ "${#remotes[@]}" -eq 1 ]]; then
+  if [[ -n "$PR_REMOTE_INPUT" ]]; then
+    if [[ "${remotes[(Ie)$PR_REMOTE_INPUT]}" -eq 0 ]]; then
+      print -u2 -- "Unknown remote: $PR_REMOTE_INPUT"
+      return 1
+    fi
+    PR_BASE_REMOTE="$PR_REMOTE_INPUT"
+  elif [[ "${#remotes[@]}" -eq 1 ]]; then
     PR_BASE_REMOTE="${remotes[1]}"
     print -- "Using base remote: $PR_BASE_REMOTE"
   else
@@ -264,8 +289,16 @@ select_pr_base() {
     branches+=("$branch")
   done
 
-  select_option "Select the pull request base branch on $PR_BASE_REMOTE:" "${branches[@]}"
-  PR_BASE_BRANCH="$SELECTED_OPTION"
+  if [[ -n "$PR_BASE_INPUT" ]]; then
+    if [[ "${branches[(Ie)$PR_BASE_INPUT]}" -eq 0 || "$PR_BASE_INPUT" == HEAD ]]; then
+      print -u2 -- "Unknown base branch on $PR_BASE_REMOTE: $PR_BASE_INPUT"
+      return 1
+    fi
+    PR_BASE_BRANCH="$PR_BASE_INPUT"
+  else
+    select_option "Select the pull request base branch on $PR_BASE_REMOTE:" "${branches[@]}"
+    PR_BASE_BRANCH="$SELECTED_OPTION"
+  fi
   PR_BASE_REF="refs/remotes/$PR_BASE_REMOTE/$PR_BASE_BRANCH"
   PR_BASE_URL="$(git -C "$REPO" remote get-url "$PR_BASE_REMOTE")"
 
@@ -276,6 +309,21 @@ select_pr_base() {
 }
 
 setup_pr_context() {
+  local needs_tui=0
+  [[ -z "$PR_BASE_INPUT" || "$PR_NO_PREVIEW" -eq 0 ]] && needs_tui=1
+  if [[ -z "$PR_REMOTE_INPUT" && "$(git -C "$REPO" remote | wc -l)" -gt 1 ]]; then
+    needs_tui=1
+  fi
+  if [[ "$needs_tui" -eq 1 ]]; then
+    if [[ ! -t 0 || ! -t 1 ]]; then
+      print -u2 -- "quill pr requires a terminal unless --base and --no-preview are set (also --remote when multiple remotes exist)."
+      return 1
+    fi
+    if [[ ! -x "$FZF" ]]; then
+      print -u2 -- "Quillmit's TUI dependency is missing. Run ./scripts/setup-deps in the source checkout, or reinstall Quillmit."
+      return 1
+    fi
+  fi
   if ! command -v gh >/dev/null 2>&1; then
     print -u2 -- "GitHub CLI not found in PATH: gh"
     return 1
@@ -286,12 +334,13 @@ setup_pr_context() {
     return 1
   fi
 
-  select_pr_base
-
-  if [[ "$(git -C "$REPO" rev-list --count "$PR_BASE_REF..HEAD")" -eq 0 ]]; then
+  while true; do
+    select_pr_base
+    [[ "$(git -C "$REPO" rev-list --count "$PR_BASE_REF..HEAD")" -gt 0 ]] && break
     print -u2 -- "No commits exist between $PR_BASE_REMOTE/$PR_BASE_BRANCH and $PR_HEAD_BRANCH."
-    return 1
-  fi
+    [[ -n "$PR_BASE_INPUT" ]] && return 1
+    print -- "Choose another base branch."
+  done
 
   CONTEXT_MODE="committed pull request changes"
   OUTPUT_NAME="pull request title and description"
@@ -636,7 +685,15 @@ write_synthesis_prompt() {
 }
 
 clean_message() {
-  sed -e 's/^```[[:alnum:]_-]*$//' -e 's/^```$//' "$MESSAGE_FILE" > "$MESSAGE_FILE.cleaned"
+  # Remove only an outer response fence. Markdown fences inside PR bodies
+  # belong to the generated content and must remain intact.
+  awk '
+    { lines[NR]=$0; if ($0 ~ /[^[:space:]]/) { if (!first) first=NR; last=NR } }
+    END {
+      wrapped=(lines[first] ~ /^```[[:alnum:]_-]*$/ && lines[last] == "```" && first < last)
+      for (i=1; i<=NR; i++) if (!wrapped || (i != first && i != last)) print lines[i]
+    }
+  ' "$MESSAGE_FILE" > "$MESSAGE_FILE.cleaned"
   mv "$MESSAGE_FILE.cleaned" "$MESSAGE_FILE"
 }
 
@@ -974,36 +1031,82 @@ copy_message() {
   print -- "Copied commit message to clipboard"
 }
 
-create_pull_request() {
-  local title
-  local body_file="$TMP_DIR/pr-body.md"
+prepare_pull_request() {
+  PR_BODY_FILE="$TMP_DIR/pr-body.md"
 
-  title="$(awk 'NF { print; exit }' "$MESSAGE_FILE")"
-  awk '!title_seen && NF { title_seen=1; next } title_seen && (body_seen || NF) { body_seen=1; print }' "$MESSAGE_FILE" > "$body_file"
-  if [[ -z "$title" ]]; then
+  PR_TITLE="$(awk 'NF { print; exit }' "$MESSAGE_FILE")"
+  awk '!title_seen && NF { title_seen=1; next } title_seen && (body_seen || NF) { body_seen=1; print }' "$MESSAGE_FILE" > "$PR_BODY_FILE"
+  if [[ -z "$PR_TITLE" ]]; then
     print -u2 -- "$LABEL did not generate a pull request title."
     return 1
   fi
-  if [[ ! -s "$body_file" ]]; then
+  if [[ ! -s "$PR_BODY_FILE" ]]; then
     print -u2 -- "$LABEL did not generate a pull request description."
     return 1
   fi
 
+  PR_PREVIEW_FILE="$TMP_DIR/pr-preview.txt"
+  {
+    print -r -- "From: $PR_HEAD_BRANCH"
+    print -r -- "Into: $PR_BASE_REPO:$PR_BASE_BRANCH"
+    print -- ""
+    print -r -- "$PR_TITLE"
+    print -- ""
+    cat "$PR_BODY_FILE"
+  } > "$PR_PREVIEW_FILE"
+}
+
+preview_pull_request() {
+  local choice result
+  # Pass the file through the environment; never put PR content in shell code.
+  if choice="$(print -r -- 'Create pull request' | \
+    QUILL_PR_PREVIEW="$PR_PREVIEW_FILE" pr_fzf \
+    --border-label=' Quillmit | Review pull request ' \
+    --no-input --info=hidden \
+    --header=$'Enter: create PR | Esc: choose another branch | Ctrl-C: cancel\nUp/Down, PgUp/PgDn or mouse wheel: scroll preview' \
+    --preview='cat -- "$QUILL_PR_PREVIEW"' --preview-window='up,80%,wrap' \
+    --expect=esc,ctrl-c,ctrl-g \
+    --bind='double-click:ignore,up:preview-up,down:preview-down,pgup:preview-page-up,pgdn:preview-page-down,home:preview-top,end:preview-bottom')"; then
+    case "${choice%%$'\n'*}" in
+      '') return 0 ;;
+      esc) return 1 ;;
+      *) print -- "Pull request cancelled."; exit 0 ;;
+    esac
+  else
+    result=$?
+    if [[ "$result" -eq 130 ]]; then
+      print -- "Pull request cancelled."
+      exit 0
+    fi
+    print -u2 -- "Pull request preview failed (exit $result)."
+    exit "$result"
+  fi
+}
+
+create_pull_request() {
   print -- "Creating pull request from $PR_HEAD_BRANCH into $PR_BASE_REPO:$PR_BASE_BRANCH..."
-  gh pr create \
+  (cd "$REPO" && gh pr create \
     --repo "$PR_BASE_URL" \
     --base "$PR_BASE_BRANCH" \
     --assignee "@me" \
-    --title "$title" \
-    --body-file "$body_file"
+    --title "$PR_TITLE" \
+    --body-file "$PR_BODY_FILE")
 }
 
-generate_message
-
 if [[ "$WORKFLOW" == "pr" ]]; then
-  create_pull_request
-  exit 0
+  while true; do
+    generate_message
+    prepare_pull_request
+    if [[ "$PR_NO_PREVIEW" -eq 1 ]] || preview_pull_request; then
+      create_pull_request
+      exit 0
+    fi
+    PR_BASE_INPUT=""
+    setup_pr_context
+  done
 fi
+
+generate_message
 
 show_message
 

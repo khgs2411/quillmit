@@ -1,102 +1,161 @@
 #!/bin/zsh
 set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BUMP_FLAG="--patch"
-BUMP_SELECTED=0
-
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+BUMP=--patch
+OPTION=""
 usage() {
   cat <<'TEXT'
-Usage: deploy [--patch|--minor|--major]
+Usage: deploy [--patch|--minor|--major|--no-bump | --resume]
 
-Bump VERSION (default: patch), verify and install the release, publish it with
-Quillmit, wait for GitHub Actions, then create the matching GitHub release.
-
+Prepare a version (default: patch), verify an isolated installation, commit and
+push all changes, wait for CI, create the matching GitHub release, then install
+it locally. If VERSION already differs from HEAD, use that prepared version.
 All working-tree changes are included in the release commit.
+Use --no-bump to publish the current VERSION without incrementing it.
+Use --resume after a failure to continue the same release without another bump.
 TEXT
 }
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --patch|--minor|--major)
-      if [[ "$BUMP_SELECTED" -eq 1 ]]; then
-        print -u2 -- "Choose exactly one of --patch, --minor, or --major."
-        exit 1
-      fi
-      BUMP_FLAG="$1"
-      BUMP_SELECTED=1
-      shift
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    *)
-      print -u2 -- "Unknown option: $1"
-      usage
-      exit 1
-      ;;
+for argument in "$@"; do
+  case "$argument" in
+    -h|--help) usage; exit 0 ;;
+    --patch|--minor|--major|--no-bump|--resume)
+      [[ -z "$OPTION" ]] || { print -u2 -- "Choose exactly one release option."; exit 1; }
+      OPTION="$argument"
+      [[ "$argument" == --resume || "$argument" == --no-bump ]] || BUMP="$argument" ;;
+    *) print -u2 -- "Unknown option: $argument"; exit 1 ;;
   esac
 done
-
-for command in git gh quill; do
-  if ! command -v "$command" >/dev/null 2>&1; then
-    print -u2 -- "Required command not found: $command"
-    exit 1
-  fi
+cd "$ROOT"
+fail() { print -u2 -- "$*"; exit 1; }
+for required in git gh zsh python3; do
+  command -v "$required" >/dev/null 2>&1 || fail "Required command not found: $required"
 done
-
-branch="$(git -C "$SCRIPT_DIR" branch --show-current)"
-if [[ "$branch" != "master" ]]; then
-  print -u2 -- "Deployments must run from master; current branch: $branch"
-  exit 1
+[[ "$(git branch --show-current)" == master ]] || fail "Deployments must run from master."
+state_dir="$(git rev-parse --path-format=absolute --git-path quill-release)"
+mkdir -p "$state_dir"
+mkdir "$state_dir/lock" 2>/dev/null || fail "Another deploy may be running. See docs/releasing.md for lock recovery."
+state_file="$state_dir/pending"
+check_dir=""
+trap '[[ -z "$check_dir" ]] || rm -rf "$check_dir"; rmdir "$state_dir/lock"' EXIT
+check_dir="$(mktemp -d "${TMPDIR:-/tmp}/quill-release.XXXXXX")"
+# Bind GitHub operations to origin, not the caller's directory or GH_REPO.
+github() { GH_REPO= GH_HOST=github.com gh "$@"; }
+github auth status --hostname github.com >/dev/null || fail "Authenticate GitHub CLI before deploying."
+remote_url="$(git remote get-url origin)"
+[[ "$(git remote get-url --push origin)" == "$remote_url" ]] || fail "origin fetch and push URLs must match."
+github_url="$(github repo view "$remote_url" --json url --jq .url)"
+[[ "$github_url" == https://github.com/*/* ]] || fail "origin must resolve to a GitHub.com repository."
+github_repo="${github_url#https://github.com/}"
+git fetch --no-tags origin refs/heads/master:refs/remotes/origin/master
+head="$(git rev-parse HEAD)"
+remote_head="$(git rev-parse refs/remotes/origin/master)"
+write_state() {
+  print -rl -- "$release_version" "$base_commit" "$release_commit" "$remote_url" "$github_repo" > "$state_file.tmp"
+  mv "$state_file.tmp" "$state_file"
+}
+# Only HTTP 404 means absent. Authentication and network failures must stop us.
+release_exists() {
+  if github api --include "repos/$github_repo/releases/tags/$tag" > "$check_dir/release" 2> "$check_dir/release-error"; then
+    return 0
+  fi
+  if LC_ALL=C grep -Eq '^HTTP/[^ ]+ 404([[:space:]]|$)' "$check_dir/release"; then return 1; fi
+  cat "$check_dir/release-error" >&2
+  fail "Could not determine whether $tag is published."
+}
+remote_tag_commit() {
+  local refs
+  refs="$(git ls-remote origin "refs/tags/$tag" "refs/tags/$tag^{}")" || return 1
+  print -r -- "$refs" | awk '$2 ~ /\^\{\}$/ { peeled=$1 } NF { direct=$1 } END { print peeled ? peeled : direct }'
+}
+if [[ "$OPTION" == --resume ]]; then
+  [[ -f "$state_file" ]] || fail "No pending release exists. Run ./deploy to start one."
+  # State is data, never sourced as shell code.
+  {
+    read -r release_version
+    read -r base_commit
+    read -r release_commit
+    read -r saved_remote
+    read -r saved_repo
+  } < "$state_file"
+  [[ "$saved_remote" == "$remote_url" && "$saved_repo" == "$github_repo" ]] || fail "Pending release target differs from origin."
+  [[ "$(tr -d '[:space:]' < VERSION)" == "$release_version" ]] || fail "VERSION differs from the pending release."
+  if [[ -z "$release_commit" && "$head" != "$base_commit" ]]; then
+    # Recover a successful commit interrupted before state could be saved.
+    [[ "$(git rev-parse HEAD^)" == "$base_commit" && -z "$(git status --porcelain)" ]] || fail "Cannot identify the pending release commit."
+    release_commit="$head"
+    write_state
+  fi
+else
+  [[ ! -f "$state_file" ]] || fail "A release is pending. Use ./deploy --resume. See docs/releasing.md to abandon it."
+  [[ "$head" == "$remote_head" ]] || fail "Local master must match origin/master before starting a release."
+  base_commit="$head"
+  release_commit=""
+  current="$(tr -d '[:space:]' < VERSION)"
+  committed="$(git show HEAD:VERSION | tr -d '[:space:]')"
+  if [[ "$current" != "$committed" || "$OPTION" == --no-bump ]]; then
+    [[ -z "$OPTION" || "$OPTION" == --no-bump ]] || fail "VERSION is already prepared; omit the bump flag."
+    autoload -Uz is-at-least
+    [[ "$current" =~ '^[0-9]+\.[0-9]+\.[0-9]+$' ]] && is-at-least "$committed" "$current" || fail "VERSION must be valid and must not be older than HEAD:VERSION."
+    release_version="$current"
+  else
+    mkdir -p "$check_dir/version/scripts"
+    cp scripts/version "$check_dir/version/scripts/version"
+    cp VERSION "$check_dir/version/VERSION"
+    zsh "$check_dir/version/scripts/version" "$BUMP" >/dev/null
+    release_version="$(tr -d '[:space:]' < "$check_dir/version/VERSION")"
+  fi
+  tag="v$release_version"
+  existing_tag="$(remote_tag_commit)"
+  [[ -z "$existing_tag" ]] || fail "Remote tag already exists: $tag"
+  if release_exists; then fail "GitHub release already exists: $tag"; fi
+  if [[ "$OPTION" == --no-bump && -z "$(git status --porcelain)" ]]; then
+    release_commit="$head"
+  fi
+  write_state
+  print -r -- "$release_version" > VERSION
 fi
-
-gh auth status >/dev/null
-git -C "$SCRIPT_DIR" fetch origin master
-local_head="$(git -C "$SCRIPT_DIR" rev-parse HEAD)"
-remote_head="$(git -C "$SCRIPT_DIR" rev-parse origin/master)"
-if [[ "$local_head" != "$remote_head" ]]; then
-  print -u2 -- "Local master must match origin/master before deployment."
-  exit 1
-fi
-
-"$SCRIPT_DIR/scripts/version" "$BUMP_FLAG"
-release_version="$(tr -d '[:space:]' < "$SCRIPT_DIR/VERSION")"
 tag="v$release_version"
-
-if gh release view "$tag" >/dev/null 2>&1; then
-  print -u2 -- "GitHub release already exists: $tag"
-  exit 1
+[[ "$release_version" =~ '^[0-9]+\.[0-9]+\.[0-9]+$' ]] || fail "Invalid pending release version."
+if [[ -n "$release_commit" ]]; then
+  [[ "$head" == "$release_commit" && -z "$(git status --porcelain)" ]] || fail "Resume requires a clean checkout at $release_commit."
 fi
-
-zsh -n "$SCRIPT_DIR/quill"
-zsh -n "$SCRIPT_DIR/install"
-zsh -n "$SCRIPT_DIR/scripts/version"
-zsh -n "$SCRIPT_DIR/deploy"
-zsh -n "$SCRIPT_DIR/test_quill.sh"
-zsh "$SCRIPT_DIR/test_quill.sh"
-"$SCRIPT_DIR/install"
-
-quill --add --commit --push "$SCRIPT_DIR"
-release_commit="$(git -C "$SCRIPT_DIR" rev-parse HEAD)"
-
+[[ "$remote_head" == "$base_commit" || ( -n "$release_commit" && "$remote_head" == "$release_commit" ) ]] || fail "origin/master changed during this release. See docs/releasing.md."
+existing_tag="$(remote_tag_commit)"
+[[ -z "$existing_tag" || ( -n "$release_commit" && "$existing_tag" == "$release_commit" ) ]] || fail "Tag $tag does not match this release commit."
+print -- "Verifying Quillmit $release_version for $github_repo..."
+for script in quill install deploy scripts/version scripts/setup-deps test_quill.sh test_release.sh; do zsh -n "$script"; done
+zsh test_quill.sh
+zsh test_release.sh
+python3 test_tui.py
+./install --bin-dir "$check_dir/bin" --install-root "$check_dir/packages"
+"$check_dir/bin/quill" --version
+if [[ -z "$release_commit" ]]; then
+  ./quill --add --commit "$ROOT"
+  release_commit="$(git rev-parse HEAD)"
+  [[ "$release_commit" != "$base_commit" && "$(git rev-parse HEAD^)" == "$base_commit" && -z "$(git status --porcelain)" ]] || fail "Release commit is incomplete; inspect the checkout before resuming."
+  write_state
+fi
+if [[ "$remote_head" != "$release_commit" ]]; then git push origin "${release_commit}:refs/heads/master"; fi
+[[ "$(git ls-remote origin refs/heads/master | awk '{print $1}')" == "$release_commit" ]] || fail "Remote master does not match the release commit."
 run_id=""
 for attempt in {1..30}; do
-  run_id="$(gh run list --commit "$release_commit" --workflow Test --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
+  run_id="$(github run list --repo "$github_repo" --commit "$release_commit" --branch master --event push --workflow test.yml --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
   [[ -n "$run_id" ]] && break
   sleep 2
 done
-if [[ -z "$run_id" ]]; then
-  print -u2 -- "Timed out waiting for the GitHub Actions run for $release_commit."
-  exit 1
+[[ -n "$run_id" ]] || fail "CI run not found. Use ./deploy --resume when it is available."
+github run watch "$run_id" --repo "$github_repo" --exit-status || fail "CI did not pass. Resolve the failure, then use ./deploy --resume."
+[[ "$(git rev-parse HEAD)" == "$release_commit" && -z "$(git status --porcelain)" ]] || fail "Checkout changed while waiting for CI."
+[[ "$(git ls-remote origin refs/heads/master | awk '{print $1}')" == "$release_commit" ]] || fail "origin/master changed while waiting for CI."
+existing_tag="$(remote_tag_commit)"
+if [[ -z "$existing_tag" ]]; then git push origin "${release_commit}:refs/tags/$tag"; fi
+[[ "$(remote_tag_commit)" == "$release_commit" ]] || fail "Tag $tag does not match the verified commit."
+if release_exists; then
+  [[ "$(github release view "$tag" --repo "$github_repo" --json isDraft --jq .isDraft)" == false ]] || fail "A draft release already exists for $tag; resolve it before resuming."
+else
+  github release create "$tag" --repo "$github_repo" --verify-tag --title "Quillmit $tag" --generate-notes --fail-on-no-commits || fail "Publication failed or its result is uncertain. Use ./deploy --resume to check it."
 fi
-
-gh run watch "$run_id" --exit-status
-gh release create "$tag" \
-  --target "$release_commit" \
-  --title "Quillmit $tag" \
-  --generate-notes \
-  --fail-on-no-commits
-
+print -- "Published $tag. Installing the published version locally..."
+./install
+rm "$state_file"
 print -- "Deployed Quillmit $release_version from $release_commit"

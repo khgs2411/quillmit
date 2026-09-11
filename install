@@ -17,11 +17,13 @@ TEXT
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --bin-dir)
-      BIN_DIR="${2:-}"
+      [[ $# -ge 2 && -n "$2" && "$2" != -* ]] || { print -u2 -- "--bin-dir requires a directory."; exit 1; }
+      BIN_DIR="$2"
       shift 2
       ;;
     --install-root)
-      INSTALL_ROOT="${2:-}"
+      [[ $# -ge 2 && -n "$2" && "$2" != -* ]] || { print -u2 -- "--install-root requires a directory."; exit 1; }
+      INSTALL_ROOT="$2"
       shift 2
       ;;
     -h|--help)
@@ -49,48 +51,24 @@ if [[ -z "$VERSION" || "$VERSION" == *[!0-9A-Za-z._-]* ]]; then
   exit 1
 fi
 
-for source_file in quill quill.config VERSION; do
+for source_file in quill quill.config VERSION scripts/setup-deps third-party/fzf.lock third-party/fzf.LICENSE; do
   if [[ ! -f "$SCRIPT_DIR/$source_file" ]]; then
     print -u2 -- "Missing install source: $SCRIPT_DIR/$source_file"
     exit 1
   fi
 done
 
-VERSION_DIR="$INSTALL_ROOT/versions/$VERSION"
+# Resolve relative paths once so the launcher works from any directory.
+BIN_DIR="${BIN_DIR:A}"
+INSTALL_ROOT="${INSTALL_ROOT:A}"
 LAUNCHER_PATH="$BIN_DIR/quill"
-STAGING_DIR="$INSTALL_ROOT/.install-$VERSION-$$"
-trap 'rm -rf "$STAGING_DIR"' EXIT
-
-mkdir -p "$BIN_DIR" "$INSTALL_ROOT/versions"
-
-if [[ -e "$VERSION_DIR" ]]; then
-  if [[ ! -f "$VERSION_DIR/quill" || ! -f "$VERSION_DIR/quill.config" || ! -f "$VERSION_DIR/VERSION" ]] || \
-     ! cmp -s "$SCRIPT_DIR/quill" "$VERSION_DIR/quill" || \
-     ! cmp -s "$SCRIPT_DIR/quill.config" "$VERSION_DIR/quill.config" || \
-     ! cmp -s "$SCRIPT_DIR/VERSION" "$VERSION_DIR/VERSION"; then
-    print -u2 -- "Quillmit $VERSION is already installed with different contents. Bump VERSION before installing changed release bytes."
-    exit 1
-  fi
-else
-  mkdir "$STAGING_DIR"
-  cp "$SCRIPT_DIR/quill" "$STAGING_DIR/quill"
-  cp "$SCRIPT_DIR/quill.config" "$STAGING_DIR/quill.config"
-  cp "$SCRIPT_DIR/VERSION" "$STAGING_DIR/VERSION"
-  chmod 755 "$STAGING_DIR/quill"
-  mv "$STAGING_DIR" "$VERSION_DIR"
-fi
-
-if [[ -L "$BIN_DIR/gcommit" ]]; then
-  rm "$BIN_DIR/gcommit"
-  print -- "Removed legacy gcommit -> $BIN_DIR/gcommit"
-fi
-
 if [[ -L "$LAUNCHER_PATH" ]]; then
   current_target="$(readlink "$LAUNCHER_PATH")"
-  case "$current_target" in
-    "$SCRIPT_DIR/quill"|*"/Repositories/codex-gcommit/"*|*"/Repositories/quill/"*|*"/Repositories/quillmit/"*)
-      rm "$LAUNCHER_PATH"
-      print -- "Removed legacy quill symlink -> $current_target"
+  resolved_target="$current_target"
+  [[ "$resolved_target" == /* ]] || resolved_target="$BIN_DIR/$resolved_target"
+  case "${resolved_target:A}" in
+    "${SCRIPT_DIR:A}/quill"|*"/Repositories/codex-gcommit/"*|*"/Repositories/quill/"*|*"/Repositories/quillmit/"*)
+      :
       ;;
     *)
       print -u2 -- "Refusing to replace unowned quill symlink: $LAUNCHER_PATH -> $current_target"
@@ -102,7 +80,53 @@ elif [[ -e "$LAUNCHER_PATH" ]] && ! grep -q '^# Quillmit installed launcher$' "$
   exit 1
 fi
 
+VERSION_DIR="$INSTALL_ROOT/versions/$VERSION"
+STAGING_DIR="$INSTALL_ROOT/.install-$VERSION-$$"
 launcher_tmp="$LAUNCHER_PATH.tmp-$$"
+trap 'rm -rf "$STAGING_DIR"; rm -f "$launcher_tmp"' EXIT
+
+mkdir -p "$BIN_DIR" "$INSTALL_ROOT/versions"
+
+mkdir "$STAGING_DIR"
+cp "$SCRIPT_DIR/quill" "$STAGING_DIR/quill"
+cp "$SCRIPT_DIR/quill.config" "$STAGING_DIR/quill.config"
+cp "$SCRIPT_DIR/VERSION" "$STAGING_DIR/VERSION"
+chmod 755 "$STAGING_DIR/quill"
+zsh "$SCRIPT_DIR/scripts/setup-deps" "$STAGING_DIR/.deps/fzf"
+
+if [[ -L "$VERSION_DIR" ]]; then
+  print -u2 -- "Refusing a symlink at the version directory: $VERSION_DIR"
+  exit 1
+fi
+
+if [[ -e "$VERSION_DIR" ]]; then
+  if [[ ! -f "$VERSION_DIR/quill" || ! -f "$VERSION_DIR/quill.config" || ! -f "$VERSION_DIR/VERSION" ]] || \
+     ! cmp -s "$SCRIPT_DIR/quill" "$VERSION_DIR/quill" || \
+     ! cmp -s "$SCRIPT_DIR/quill.config" "$VERSION_DIR/quill.config" || \
+     ! cmp -s "$SCRIPT_DIR/VERSION" "$VERSION_DIR/VERSION" || \
+     ! diff -rq "$STAGING_DIR/.deps/fzf" "$VERSION_DIR/.deps/fzf" >/dev/null 2>&1; then
+    print -u2 -- "Quillmit $VERSION is already installed with different contents. Bump VERSION before installing changed release bytes."
+    exit 1
+  fi
+else
+  mv "$STAGING_DIR" "$VERSION_DIR"
+fi
+
+if [[ -L "$BIN_DIR/gcommit" ]]; then
+  legacy_target="$(readlink "$BIN_DIR/gcommit")"
+  [[ "$legacy_target" == /* ]] || legacy_target="$BIN_DIR/$legacy_target"
+  case "${legacy_target:A}" in
+    "${SCRIPT_DIR:A}/gcommit"|*"/Repositories/codex-gcommit/"*|*"/Repositories/quill/"*|*"/Repositories/quillmit/"*)
+      rm "$BIN_DIR/gcommit"
+      print -- "Removed legacy gcommit -> $BIN_DIR/gcommit"
+      ;;
+    *) print -u2 -- "Preserved unrecognized gcommit symlink: $BIN_DIR/gcommit" ;;
+  esac
+fi
+if [[ -L "$LAUNCHER_PATH" ]]; then
+  print -- "Removed legacy quill symlink -> $current_target"
+fi
+
 target_quoted="$(printf '%q' "$VERSION_DIR/quill")"
 {
   print -r -- '#!/bin/zsh'
@@ -112,7 +136,7 @@ target_quoted="$(printf '%q' "$VERSION_DIR/quill")"
   print -r -- "exec $target_quoted \"\$@\""
 } > "$launcher_tmp"
 chmod 755 "$launcher_tmp"
-mv "$launcher_tmp" "$LAUNCHER_PATH"
+mv -f "$launcher_tmp" "$LAUNCHER_PATH"
 
 for installed_dir in "$INSTALL_ROOT/versions"/*(N); do
   [[ "$installed_dir" == "$VERSION_DIR" ]] && continue

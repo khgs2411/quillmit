@@ -421,7 +421,7 @@ Example configuration:
 ```sh
 DEFAULT_PROVIDER=codex
 
-CODEX_MODEL=gpt-5.3-codex-spark
+CODEX_MODEL=gpt-5.6-luna
 CODEX_REASONING_EFFORT=low
 CODEX_FALLBACK_MODEL=gpt-5.6-luna
 CODEX_FALLBACK_REASONING_EFFORT=low

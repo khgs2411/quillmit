@@ -46,7 +46,8 @@ For the complete release gate, including real AI usage:
 
 The live smoke test uses the checked-out `quill.config` and installed provider CLI.
 It incurs model usage and requires authentication. The current configuration uses
-`gpt-5.3-codex-spark`, with `gpt-5.6-luna` as the usage-limit fallback. It tests a
+`gpt-5.6-luna` with low reasoning. The fallback remains `gpt-5.6-luna` with low
+reasoning, so no alternate model retry occurs. It tests a
 real AI-generated branch and worktree, remote-default selection, links, listing,
 local removal, pending and ignored files, locks, active Git operations, upstream
 checks, unpushed commits, and remote failure. Its repositories and remotes are

@@ -48,6 +48,7 @@ WT_REMOTE=""
 DEFAULT_PROVIDER=codex
 CODEX_MODEL=gpt-6-luna
 CODEX_REASONING_EFFORT=low
+CODEX_SERVICE_TIER=fast
 CODEX_FALLBACK_MODEL=gpt-6-luna
 CODEX_FALLBACK_REASONING_EFFORT=low
 CLAUDE_MODEL=haiku
@@ -825,6 +826,9 @@ run_provider_once() {
       )
       if [[ -n "$reasoning_effort" ]]; then
         args+=(-c "model_reasoning_effort=$reasoning_effort")
+      fi
+      if [[ -n "$CODEX_SERVICE_TIER" ]]; then
+        args+=(-c "service_tier=$CODEX_SERVICE_TIER")
       fi
       codex "${args[@]}" -o "$message_file" - < "$prompt_file"
       ;;

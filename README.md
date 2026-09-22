@@ -423,6 +423,7 @@ DEFAULT_PROVIDER=codex
 
 CODEX_MODEL=gpt-6-luna
 CODEX_REASONING_EFFORT=low
+CODEX_SERVICE_TIER=fast
 CODEX_FALLBACK_MODEL=gpt-6-luna
 CODEX_FALLBACK_REASONING_EFFORT=low
 CLAUDE_MODEL=haiku
@@ -439,8 +440,10 @@ If a primary model reports a usage limit, Quillmit retries the same request once
 with that provider's fallback model. A fallback value that is empty or equal to
 the primary model disables the retry. The Codex primary call uses
 `CODEX_REASONING_EFFORT`, and the fallback call uses
-`CODEX_FALLBACK_REASONING_EFFORT`. Other provider failures do not trigger a
-fallback.
+`CODEX_FALLBACK_REASONING_EFFORT`. Codex calls also use
+`CODEX_SERVICE_TIER` (`fast` by default). Fast mode uses 2.5x standard ChatGPT
+credits for GPT-6 models where available. Other provider failures do not trigger
+a fallback.
 
 The byte budgets are conservative input limits that reserve context for
 provider instructions and output. They can be tuned independently when using a

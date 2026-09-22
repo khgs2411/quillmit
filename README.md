@@ -25,6 +25,9 @@ The project is Quillmit. The executable is `quill`.
 | --- | --- |
 | Generate a commit message and choose an action | `quill` |
 | Stage all changes, generate a message, commit, and push | `quill -f` |
+| Set the Codex model and reasoning for future runs | `quill --model gpt-6-sol --reasoning high` |
+| Restore the default Codex model and reasoning | `quill --model default` |
+| Turn Codex fast mode on or off | `quill --fast true` / `quill --fast false` |
 | Select a PR target and approve the generated content | `quill pr` |
 | Create a worktree from a task description | `quill worktree create "fix parser retries"` |
 | Show registered worktrees and their status | `quill worktree list` |
@@ -399,22 +402,40 @@ the main checkout afterward; Quillmit cannot change its parent shell's directory
 
 ## Config
 
-Quillmit loads the `quill.config` beside the executable. An installed release
-has its own copy. Editing the source checkout does not change that copy.
+Quillmit loads the `quill.config` beside the executable until a personal config
+exists at `${XDG_CONFIG_HOME:-$HOME/.config}/quillmit/quill.config`. It then loads
+the personal config automatically. An installed release has its own bundled
+copy; editing the source checkout does not change that copy.
 
-For personal settings, copy the configuration outside the release package and
-pass its path explicitly:
+Settings commands create the personal config from the bundled copy when needed
+and update only the selected Codex settings. They do not run Git or an AI CLI:
 
 ```sh
-mkdir -p "$HOME/.config/quillmit"
-cp quill.config "$HOME/.config/quillmit/quill.config"
-quill --config "$HOME/.config/quillmit/quill.config"
+quill --model gpt-6-sol --reasoning high
+quill --model default              # gpt-6-luna, reasoning low
+quill --fast true                  # fast service tier
+quill --fast false                 # standard service tier
 ```
 
-Run the copy command from a source checkout or extracted release. Edit the
-personal file after copying it. Do not repeat the copy when updating Quillmit,
-since that would overwrite your settings. Configuration files contain shell
-assignments and are executed by zsh; use files you trust.
+`--model` alone keeps the current reasoning effort; `--reasoning` can also be
+used alone. `--model default` changes the model and reasoning effort but leaves
+fast mode as it was. Pass `--config /path/to/quill.config` with a settings command
+to update that existing file instead. Settings flags cannot be combined with an
+execution command.
+
+For other personal settings, edit the personal config directly. To create it
+without changing a Codex setting, copy the bundled config to that path:
+
+```sh
+mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/quillmit"
+cp quill.config "${XDG_CONFIG_HOME:-$HOME/.config}/quillmit/quill.config"
+```
+
+Run the copy command from a source checkout or extracted release. Quillmit reads
+that file automatically. Do not repeat the copy when updating Quillmit, since
+that would overwrite your settings.
+Configuration files contain shell assignments and are executed by zsh; use files
+you trust.
 
 Example configuration:
 

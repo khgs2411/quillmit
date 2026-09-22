@@ -15,6 +15,7 @@ Usage:
   quill worktree list [--repo path]
   quill worktree remove [name|path] [--repo path]
   quill pr [--remote name] [--base branch] [--no-preview] [--codex|--claude|--gemini|--provider name] [--config file] [--verbose] [repo]
+  quill [--model name|default] [--reasoning effort] [--fast true|false] [--config file]
 
 Generate a medium-sized Git commit message, prepare it, then choose an action.
 Use "quill pr" to select a remote base branch and create a pull request.
@@ -23,6 +24,7 @@ Worktree creation also accepts provider flags. --branch supplies a name without 
 Use --from for a local starting ref; without a remote, --from is required.
 Without a removal target, Quillmit selects the current linked worktree.
 Worktree removal preserves branches and refuses files or commits at risk.
+Settings commands save Codex preferences for future Quillmit runs.
 TEXT
 }
 
@@ -36,6 +38,13 @@ FULL_REQUESTED=0
 NON_COMMIT_MODE_FLAGS=""
 PROVIDER=""
 CONFIG_FILE="$SCRIPT_DIR/quill.config"
+PERSONAL_CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/quillmit/quill.config"
+[[ ! -f "$PERSONAL_CONFIG_FILE" ]] || CONFIG_FILE="$PERSONAL_CONFIG_FILE"
+CONFIG_EXPLICIT=0
+SETTINGS_MODEL=""
+SETTINGS_REASONING=""
+SETTINGS_FAST=""
+SETTINGS_REQUESTED=0
 PR_REMOTE_INPUT=""
 PR_BASE_INPUT=""
 PR_NO_PREVIEW=0
@@ -157,6 +166,18 @@ while [[ $# -gt 0 ]]; do
       ;;
     --config)
       CONFIG_FILE="${2:-}"
+      CONFIG_EXPLICIT=1
+      shift 2
+      ;;
+    --model|--reasoning|--fast)
+      setting_flag="$1"
+      [[ $# -ge 2 && -n "$2" && "$2" != -* ]] || { print -u2 -- "$setting_flag requires a value."; exit 1; }
+      case "$setting_flag" in
+        --model) SETTINGS_MODEL="$2" ;;
+        --reasoning) SETTINGS_REASONING="$2" ;;
+        --fast) SETTINGS_FAST="$2" ;;
+      esac
+      SETTINGS_REQUESTED=1
       shift 2
       ;;
     --version)
@@ -178,6 +199,68 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ "$SETTINGS_REQUESTED" -eq 1 ]]; then
+  if [[ "$WORKFLOW" != commit || "$MODE" != interactive || "$ADD_ALL" -eq 1 ||
+        "$PUSH_AFTER_COMMIT" -eq 1 || "$VERBOSE" -eq 1 || -n "$PROVIDER" || -n "$REPO_INPUT" ]]; then
+    print -u2 -- "Settings commands cannot be combined with execution commands or a repository."
+    exit 1
+  fi
+  if [[ -n "$SETTINGS_MODEL" && "$SETTINGS_MODEL" != default &&
+        ! "$SETTINGS_MODEL" =~ '^[A-Za-z0-9][A-Za-z0-9._:/-]*$' ]]; then
+    print -u2 -- "Invalid model name: $SETTINGS_MODEL"
+    exit 1
+  fi
+  case "$SETTINGS_REASONING" in
+    ""|none|minimal|low|medium|high|xhigh|max|ultra) ;;
+    *) print -u2 -- "Invalid reasoning effort: $SETTINGS_REASONING"; exit 1 ;;
+  esac
+  case "$SETTINGS_FAST" in
+    ""|true|false) ;;
+    *) print -u2 -- "--fast must be true or false."; exit 1 ;;
+  esac
+  if [[ "$SETTINGS_MODEL" == default ]]; then
+    [[ -z "$SETTINGS_REASONING" ]] || { print -u2 -- "--model default already sets reasoning to low."; exit 1; }
+    SETTINGS_MODEL=gpt-6-luna
+    SETTINGS_REASONING=low
+  fi
+  if [[ "$CONFIG_EXPLICIT" -eq 0 ]]; then
+    CONFIG_FILE="$PERSONAL_CONFIG_FILE"
+  elif [[ ! -f "$CONFIG_FILE" ]]; then
+    print -u2 -- "Config file does not exist: $CONFIG_FILE"
+    exit 1
+  fi
+  if [[ -L "$CONFIG_FILE" ]]; then
+    print -u2 -- "Refusing to replace a config symlink: $CONFIG_FILE"
+    exit 1
+  fi
+  settings_source="$CONFIG_FILE"
+  [[ -f "$settings_source" ]] || settings_source="$SCRIPT_DIR/quill.config"
+  mkdir -p -- "${CONFIG_FILE:h}"
+  umask 077
+  settings_tmp="$(mktemp "${CONFIG_FILE:h}/.quill.config.XXXXXX")"
+  if ! LC_ALL=C awk \
+    -v model="$SETTINGS_MODEL" \
+    -v reasoning="$SETTINGS_REASONING" \
+    -v fast="$SETTINGS_FAST" '
+      /^CODEX_MODEL=/ && model != "" { next }
+      /^CODEX_REASONING_EFFORT=/ && reasoning != "" { next }
+      /^CODEX_SERVICE_TIER=/ && fast != "" { next }
+      { print }
+      END {
+        if (model != "") print "CODEX_MODEL=" model
+        if (reasoning != "") print "CODEX_REASONING_EFFORT=" reasoning
+        if (fast != "") print "CODEX_SERVICE_TIER=" (fast == "true" ? "fast" : "default")
+      }
+    ' "$settings_source" > "$settings_tmp"; then
+    rm -f -- "$settings_tmp"
+    print -u2 -- "Could not update config: $CONFIG_FILE"
+    exit 1
+  fi
+  mv -f -- "$settings_tmp" "$CONFIG_FILE"
+  print -- "Updated Codex settings in $CONFIG_FILE"
+  exit 0
+fi
 
 if [[ "$WORKFLOW" != "commit" && ( "$MODE" != "interactive" || "$ADD_ALL" -eq 1 || "$PUSH_AFTER_COMMIT" -eq 1 ) ]]; then
   print -u2 -- "Commit workflow flags cannot be combined with quill $WORKFLOW."

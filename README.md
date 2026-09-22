@@ -28,6 +28,8 @@ The project is Quillmit. The executable is `quill`.
 | Set the Codex model and reasoning for future runs | `quill --model gpt-6-sol --reasoning high` |
 | Restore the default Codex model and reasoning | `quill --model default` |
 | Turn Codex fast mode on or off | `quill --fast true` / `quill --fast false` |
+| Show the active provider settings | `quill --which` |
+| Show commands and examples | `quill --help` |
 | Select a PR target and approve the generated content | `quill pr` |
 | Create a worktree from a task description | `quill worktree create "fix parser retries"` |
 | Show registered worktrees and their status | `quill worktree list` |
@@ -415,13 +417,19 @@ quill --model gpt-6-sol --reasoning high
 quill --model default              # gpt-6-luna, reasoning low
 quill --fast true                  # fast service tier
 quill --fast false                 # standard service tier
+quill --which                      # show the settings Quillmit will use
+quill --help                       # commands, options, and examples
 ```
 
 `--model` alone keeps the current reasoning effort; `--reasoning` can also be
 used alone. `--model default` changes the model and reasoning effort but leaves
 fast mode as it was. Pass `--config /path/to/quill.config` with a settings command
 to update that existing file instead. Settings flags cannot be combined with an
-execution command.
+execution command. `--which` reads the active config and prints its path, default
+provider, model, reasoning, and fast status without starting Git or an AI CLI.
+Use `quill --which --config /path/to/quill.config` to inspect another file. For
+Claude and Gemini, reasoning is managed by their CLI and Quillmit fast mode is
+off because it applies only to Codex.
 
 For other personal settings, edit the personal config directly. To create it
 without changing a Codex setting, copy the bundled config to that path:

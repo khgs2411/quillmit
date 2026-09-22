@@ -10,21 +10,62 @@ fi
 usage() {
   cat <<'TEXT'
 Usage:
-  quill [-a|-c|-p|-f] [--codex|--claude|--gemini|--provider name] [--config file] [--prepare|--commit|--copy|--quit|--add|--push|--full|--verbose|--version] [repo]
+  quill [-a|-c|-p|-f] [--codex|--claude|--gemini|--provider name] [--config file] [repo]
+  quill [--prepare|--commit|--copy|--quit|--add|--push|--full|--verbose] [repo]
+  quill pr [--remote name] [--base branch] [--no-preview] [provider options] [repo]
   quill worktree create [intent] [--branch name] [--from ref] [--remote name] [--no-preview] [--repo path]
   quill worktree list [--repo path]
   quill worktree remove [name|path] [--repo path]
-  quill pr [--remote name] [--base branch] [--no-preview] [--codex|--claude|--gemini|--provider name] [--config file] [--verbose] [repo]
   quill [--model name|default] [--reasoning effort] [--fast true|false] [--config file]
+  quill --which [--config file]
+  quill --help | --version
 
-Generate a medium-sized Git commit message, prepare it, then choose an action.
-Use "quill pr" to select a remote base branch and create a pull request.
-Use --remote and --base to skip PR selection; --no-preview approves creation.
-Worktree creation also accepts provider flags. --branch supplies a name without AI.
-Use --from for a local starting ref; without a remote, --from is required.
-Without a removal target, Quillmit selects the current linked worktree.
-Worktree removal preserves branches and refuses files or commits at risk.
-Settings commands save Codex preferences for future Quillmit runs.
+Commit message examples:
+  quill                         Generate, prepare, and choose an action.
+  quill -c                      Generate and commit staged changes.
+  quill -a -c                   Stage all changes, then commit.
+  quill -c -p                   Commit, then push.
+  quill -f                      Stage all, commit, and push (no prompt).
+  quill --prepare               Generate and prepare COMMIT_EDITMSG, then exit.
+  quill --copy                  Generate, prepare, and copy the message.
+  quill --quit                  Generate and print without preparing or committing.
+  quill --claude /path/to/repo   Use Claude for one run; --gemini also works.
+
+Pull request and worktree examples:
+  quill pr                      Select a target and review the PR before creation.
+  quill pr --remote origin --base main --no-preview
+                                Create a PR without interactive selection or preview.
+  quill worktree create "fix retries"
+                                Propose a branch and preview the worktree.
+  quill worktree create --branch fix/retries --from HEAD --no-preview
+                                Create without AI or a preview.
+  quill worktree list           Show linked worktrees.
+  quill worktree remove name    Safely remove a linked worktree, keeping its branch.
+
+Settings examples (no Git or AI work):
+  quill --model gpt-6-sol --reasoning high
+                                Save the Codex model and reasoning effort.
+  quill --reasoning high        Change reasoning without changing the model.
+  quill --model default         Restore gpt-6-luna and low reasoning; keep fast as is.
+  quill --fast true             Turn Codex fast mode on.
+  quill --fast false            Turn Codex fast mode off.
+  quill --which                 Show the configured provider and active settings.
+  quill --which --config /path/to/quill.config
+                                Inspect a specific config file.
+
+Options:
+  -a, --add        Stage all changes before generation.
+  -c, --commit     Commit without an approval prompt (--yes also works).
+  -p, --push       Push only after a successful commit.
+  -f, --full       Same as --add --commit --push.
+  --codex, --claude, --gemini, --provider name
+                   Select the AI provider for one execution.
+  --config file    Read this config for execution or --which; settings edit it.
+  --verbose        Show provider output while generating.
+  --help           Show this guide. --version prints the installed version.
+
+Settings are saved in a personal quill.config and loaded by future runs.
+Reasoning and fast mode are Quillmit controls for Codex only.
 TEXT
 }
 
@@ -45,6 +86,7 @@ SETTINGS_MODEL=""
 SETTINGS_REASONING=""
 SETTINGS_FAST=""
 SETTINGS_REQUESTED=0
+WHICH_REQUESTED=0
 PR_REMOTE_INPUT=""
 PR_BASE_INPUT=""
 PR_NO_PREVIEW=0
@@ -180,6 +222,10 @@ while [[ $# -gt 0 ]]; do
       SETTINGS_REQUESTED=1
       shift 2
       ;;
+    --which)
+      WHICH_REQUESTED=1
+      shift
+      ;;
     --version)
       print -- "quill $QUILLMIT_VERSION"
       exit 0
@@ -202,7 +248,8 @@ done
 
 if [[ "$SETTINGS_REQUESTED" -eq 1 ]]; then
   if [[ "$WORKFLOW" != commit || "$MODE" != interactive || "$ADD_ALL" -eq 1 ||
-        "$PUSH_AFTER_COMMIT" -eq 1 || "$VERBOSE" -eq 1 || -n "$PROVIDER" || -n "$REPO_INPUT" ]]; then
+        "$PUSH_AFTER_COMMIT" -eq 1 || "$VERBOSE" -eq 1 || -n "$PROVIDER" ||
+        -n "$REPO_INPUT" || "$WHICH_REQUESTED" -eq 1 ]]; then
     print -u2 -- "Settings commands cannot be combined with execution commands or a repository."
     exit 1
   fi
@@ -262,6 +309,18 @@ if [[ "$SETTINGS_REQUESTED" -eq 1 ]]; then
   exit 0
 fi
 
+if [[ "$WHICH_REQUESTED" -eq 1 ]]; then
+  if [[ "$WORKFLOW" != commit || "$MODE" != interactive || "$ADD_ALL" -eq 1 ||
+        "$PUSH_AFTER_COMMIT" -eq 1 || "$VERBOSE" -eq 1 || -n "$PROVIDER" || -n "$REPO_INPUT" ]]; then
+    print -u2 -- "--which cannot be combined with execution commands or a repository."
+    exit 1
+  fi
+  if [[ "$CONFIG_EXPLICIT" -eq 1 && ! -f "$CONFIG_FILE" ]]; then
+    print -u2 -- "Config file does not exist: $CONFIG_FILE"
+    exit 1
+  fi
+fi
+
 if [[ "$WORKFLOW" != "commit" && ( "$MODE" != "interactive" || "$ADD_ALL" -eq 1 || "$PUSH_AFTER_COMMIT" -eq 1 ) ]]; then
   print -u2 -- "Commit workflow flags cannot be combined with quill $WORKFLOW."
   exit 1
@@ -316,6 +375,23 @@ provider_model() {
     gemini) print -- "$GEMINI_MODEL" ;;
   esac
 }
+
+if [[ "$WHICH_REQUESTED" -eq 1 ]]; then
+  print -r -- "Config: $CONFIG_FILE"
+  print -r -- "Provider: $PROVIDER"
+  print -r -- "Model: $(provider_model)"
+  if [[ "$PROVIDER" == codex ]]; then
+    print -r -- "Reasoning: $CODEX_REASONING_EFFORT"
+    case "$CODEX_SERVICE_TIER" in
+      fast|priority) print -r -- "Fast: true" ;;
+      *) print -r -- "Fast: false" ;;
+    esac
+  else
+    print -r -- "Reasoning: n/a (managed by the $PROVIDER CLI)"
+    print -r -- "Fast: false (Codex only)"
+  fi
+  exit 0
+fi
 
 provider_fallback_model() {
   case "$PROVIDER" in

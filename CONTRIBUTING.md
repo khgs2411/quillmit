@@ -76,12 +76,27 @@ terminal suite (`test_tui_real.py`):
 
 ```sh
 zsh test_quill.sh
+python3 test_large_context.py
 zsh test_release.sh
 python3 test_tui.py
 python3 test_worktree.py
 python3 test_tui_real.py
 python3 test_worktree_live.py
 ```
+
+`test_large_context.py` uses fake providers and disposable staged repositories
+without creating commits or installing anything. It checks payload filtering,
+sequential batches, failure handling, cancellation, timestamped terminal output,
+and commit/push timing through fake Git actions. To also verify an existing
+repository's staged diff through the read-only `--quit` flow:
+
+```sh
+python3 test_large_context.py --staged-repo /path/to/repository
+```
+
+The staged-repository check compares the index, HEAD, and working-tree status
+before and after generation. Provider calls and logs remain in its temporary
+test directory.
 
 The worktree failure tests cover concurrent file and commit changes during fetch,
 diverged history, active Git operations with clean files, and setup failures.

@@ -90,19 +90,25 @@ The packaged TUI supports macOS and Linux on ARM64 and x86-64.
 
 ```text
 $ quill
-Generating commit message with Codex |
-Generated commit message with Codex.
+✦ quillmit · my-project
+  Codex · gpt-6-luna · staged changes only
 
-Generated commit message:
--------------------------
+[11/10/2026 1:04:09 PM]: Reading Git context...
+[11/10/2026 1:04:09 PM]: ✓ Git context · 0.1s
+[11/10/2026 1:04:09 PM]: Generating commit message with Codex...
+[11/10/2026 1:04:15 PM]: Drafting commit message [==========>-------------] 0/1 · 6.2s elapsed
+[11/10/2026 1:04:18 PM]: ✓ Drafting commit message · 8.7s
+[11/10/2026 1:04:18 PM]: ✓ Generated commit message with Codex · 8.8s total
+
+── Generated commit message: ──
 Add provider-aware commit message preparation
 
 Route the current Git context through the selected AI CLI and keep provider
 output quiet by default.
 Prepare COMMIT_EDITMSG before prompting so normal git commit remains available.
 Support commit, copy, regenerate, and quit actions from the terminal flow.
--------------------------
-Prepared commit message at /path/to/repo/.git/COMMIT_EDITMSG
+──────────────────────────────
+[11/10/2026 1:04:18 PM]: Prepared commit message at /path/to/repo/.git/COMMIT_EDITMSG
 [c]ommit, [e]dit, co[p]y, [r]egenerate, [q]uit:
 ```
 
@@ -207,9 +213,27 @@ Commit actions only commit staged changes by default.
 
 When the Git context exceeds the selected provider's configured prompt budget,
 Quillmit groups complete file diffs into bounded batches, summarizes those
-batches in parallel, and makes one final provider call to synthesize the commit
+batches sequentially, and makes one final provider call to synthesize the commit
 message. A single file larger than a batch is split at diff-hunk boundaries,
 with a byte-bounded fallback for an individual oversized hunk.
+
+Before measuring or batching context, Quillmit replaces valid inline Base64 data
+URL payloads with placeholders retaining the media type, encoded byte count, and
+SHA-256 fingerprint. Surrounding code and diff markers are preserved, so asset
+changes remain distinguishable without sending the encoded binary data to AI.
+This only changes AI context; staged files remain untouched. Commit and PR
+generation use the same filtering and sequential execution. A failed batch stops
+generation before synthesis. Cancellation terminates the active provider process
+group and waits for its supervisor before removing temporary files.
+
+Status messages use local timestamps in `[DD/MM/YYYY h:mm:ss AM/PM]:` format.
+The loading bar shows the active stage and elapsed time. Status output reports
+the time spent preparing context, summarizing each batch, writing the final
+message, and the generation total. Commit and push actions also report their duration.
+Terminal output adds color and emphasizes the message title. Set `NO_COLOR` to
+disable color; redirected output and `TERM=dumb` use plain, timestamped text
+without the loading animation. Display formatting never enters the generated
+commit message or PR description.
 
 By default it uses Codex. Other providers:
 

@@ -352,7 +352,7 @@ CONFIG
   assert_contains "$(<"$args_capture")" "--model claude-haiku-4-5-20251001"
 }
 
-test_large_context_uses_parallel_batches_and_synthesis() {
+test_large_context_uses_sequential_batches_and_synthesis() {
   local repo="$TMP_ROOT/batched"
   git init -q "$repo"
   write_large_file "$repo/one.txt" "one" 220
@@ -367,7 +367,7 @@ test_large_context_uses_parallel_batches_and_synthesis() {
   output="$(QUILL_PROMPT_CAPTURE_DIR="$captures" PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --config "$config" --quit "$repo")"
 
   assert_contains "$output" "Large change detected: 3 files"
-  assert_contains "$output" "parallel batches"
+  assert_contains "$output" "sequential batches"
   assert_contains "$output" "Add terminal commit message helper"
   assert_not_contains "$output" "diff_bytes="
   local summary_count
@@ -838,7 +838,7 @@ make_install_source() {
   local source="$1"
   mkdir -p "$source/scripts" "$source/third-party" "$source/fake-bin" "$source/archive"
   cp "$ROOT/quill" "$ROOT/quill.config" "$ROOT/VERSION" "$ROOT/install" "$source/"
-  cp "$ROOT/scripts/setup-deps" "$ROOT/scripts/worktree" "$source/scripts/"
+  cp "$ROOT/scripts/setup-deps" "$ROOT/scripts/worktree" "$ROOT/scripts/filter-diff.py" "$ROOT/scripts/run-provider.py" "$source/scripts/"
   cp "$ROOT/third-party/fzf.LICENSE" "$source/third-party/"
   print -rl -- '#!/bin/sh' 'echo fixture-fzf' > "$source/archive/fzf"
   chmod +x "$source/archive/fzf"
@@ -1145,7 +1145,7 @@ test_staged_changes_use_staged_context_only
 test_claude_provider_uses_configured_model
 test_gemini_provider_uses_configured_model
 test_config_overrides_default_provider_and_models
-test_large_context_uses_parallel_batches_and_synthesis
+test_large_context_uses_sequential_batches_and_synthesis
 test_single_oversized_file_splits_across_batches
 test_batch_budget_is_selected_per_provider
 test_commits_with_generated_message

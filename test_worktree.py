@@ -26,6 +26,8 @@ class WorktreeContracts(unittest.TestCase):
         (self.package / ".deps/fzf").mkdir(parents=True)
         shutil.copy2(ROOT / "quill", self.package / "quill")
         shutil.copy2(ROOT / "scripts/worktree", self.package / "scripts/worktree")
+        shutil.copy2(ROOT / "scripts/filter-diff.py", self.package / "scripts/filter-diff.py")
+        shutil.copy2(ROOT / "scripts/run-provider.py", self.package / "scripts/run-provider.py")
         (self.package / "quill.config").write_text("CODEX_FALLBACK_MODEL=\n")
         self.git("init", "-q", "-b", "main", str(self.repo), cwd=self.root)
         self.git("config", "user.name", "Worktree Test")

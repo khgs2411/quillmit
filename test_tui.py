@@ -27,6 +27,8 @@ class PullRequestFlow(unittest.TestCase):
         shutil.copy2(ROOT / "quill", self.package / "quill")
         (self.package / "scripts").mkdir()
         shutil.copy2(ROOT / "scripts/worktree", self.package / "scripts/worktree")
+        shutil.copy2(ROOT / "scripts/filter-diff.py", self.package / "scripts/filter-diff.py")
+        shutil.copy2(ROOT / "scripts/run-provider.py", self.package / "scripts/run-provider.py")
         (self.package / "quill.config").write_text("CODEX_FALLBACK_MODEL=\n")
         self.git("init", "-q", "-b", "master", str(self.repo), cwd=self.root)
         self.git("config", "user.name", "TUI Test")

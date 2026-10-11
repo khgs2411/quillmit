@@ -17,6 +17,7 @@ for script in quill install deploy scripts/version scripts/setup-deps scripts/wo
   zsh -n "$script"
 done
 zsh test_quill.sh
+python3 test_large_context.py
 zsh test_release.sh
 python3 test_tui.py
 python3 test_worktree.py

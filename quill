@@ -598,7 +598,28 @@ if [[ "$WORKFLOW" != worktree || ( "$WT_ACTION" == create && -z "$WT_BRANCH" ) ]
 fi
 
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/quill.XXXXXX")"
-trap 'rm -rf "$TMP_DIR"' EXIT
+ACTIVE_PROVIDER_PID=""
+PROGRESS_PID=""
+cleanup() {
+  trap '' INT TERM HUP
+  if [[ -n "$ACTIVE_PROVIDER_PID" ]]; then
+    kill -TERM "$ACTIVE_PROVIDER_PID" 2>/dev/null || true
+    wait "$ACTIVE_PROVIDER_PID" 2>/dev/null || true
+    ACTIVE_PROVIDER_PID=""
+  fi
+  if [[ -n "$PROGRESS_PID" ]]; then
+    kill -TERM "$PROGRESS_PID" 2>/dev/null || true
+    wait "$PROGRESS_PID" 2>/dev/null || true
+    PROGRESS_PID=""
+    print -rn -- $'\r\e[2K'
+  fi
+  rm -rf "$TMP_DIR"
+}
+# zsh can skip EXIT when exiting inside a function, including on errexit.
+trap cleanup EXIT ZERR
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
+trap 'cleanup; exit 129' HUP
 MESSAGE_FILE="$TMP_DIR/message.txt"
 PROMPT_FILE="$TMP_DIR/prompt.txt"
 LOG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/quill"
@@ -609,11 +630,23 @@ if ! { mkdir -p "$LOG_DIR" && : > "$LOG_FILE"; } 2>/dev/null; then
   LOG_FILE="$LOG_DIR/last.log"
   : > "$LOG_FILE"
 fi
-PROGRESS_PID=""
 PROGRESS_FILE="$TMP_DIR/progress"
+PROGRESS_TIMINGS_FILE="$TMP_DIR/timings"
+PROGRESS_PHASE=""
 FALLBACK_USED_FILE="$TMP_DIR/provider-fallback-used"
 PROGRESS_TOTAL=1
 PROGRESS_WIDTH=24
+zmodload zsh/datetime
+typeset -F SECONDS GENERATION_STARTED
+UI_ACCENT="" UI_DIM="" UI_BOLD="" UI_SUCCESS="" UI_ERROR="" UI_RESET=""
+if [[ -t 1 && "${TERM:-dumb}" != dumb && ! -v NO_COLOR ]]; then
+  UI_ACCENT=$'\e[36m'
+  UI_DIM=$'\e[2m'
+  UI_BOLD=$'\e[1m'
+  UI_SUCCESS=$'\e[32m'
+  UI_ERROR=$'\e[31m'
+  UI_RESET=$'\e[0m'
+fi
 BATCH_COUNT=0
 BATCH_FILE_COUNT=0
 BATCH_CONTENT_BYTES=$((MAX_PROMPT_BYTES - 12000))
@@ -683,13 +716,15 @@ write_git_overview() {
 }
 
 write_diff() {
-  if [[ "$WORKFLOW" == "pr" ]]; then
-    git -C "$REPO" diff --no-ext-diff "$PR_BASE_REF...HEAD" "$@"
-  elif [[ "$CONTEXT_MODE" == "staged changes only" ]]; then
-    git -C "$REPO" diff --cached --no-ext-diff "$@"
-  else
-    git -C "$REPO" diff --no-ext-diff "$@"
-  fi
+  {
+    if [[ "$WORKFLOW" == "pr" ]]; then
+      git -C "$REPO" diff --no-ext-diff "$PR_BASE_REF...HEAD" "$@"
+    elif [[ "$CONTEXT_MODE" == "staged changes only" ]]; then
+      git -C "$REPO" diff --cached --no-ext-diff "$@"
+    else
+      git -C "$REPO" diff --no-ext-diff "$@"
+    fi
+  } | python3 "$SCRIPT_DIR/scripts/filter-diff.py"
 }
 
 write_changed_file_names() {
@@ -898,9 +933,57 @@ clean_message() {
   mv "$MESSAGE_FILE.cleaned" "$MESSAGE_FILE"
 }
 
+ui_timestamp() {
+  local stamp
+  LC_ALL=C strftime -s stamp '%d/%m/%Y %I:%M:%S %p' "$EPOCHSECONDS"
+  UI_TIMESTAMP="${stamp/ 0/ }"
+}
+
+ui_duration() {
+  local -F elapsed="$1"
+  local -i whole="$elapsed"
+  if (( whole >= 3600 )); then
+    printf -v UI_DURATION '%dh %dm %ds' $((whole / 3600)) $((whole % 3600 / 60)) $((whole % 60))
+  elif (( whole >= 60 )); then
+    printf -v UI_DURATION '%dm %ds' $((whole / 60)) $((whole % 60))
+  else
+    printf -v UI_DURATION '%.1fs' "$elapsed"
+  fi
+}
+
+ui_log() {
+  ui_timestamp
+  print -r -- "${UI_DIM}[$UI_TIMESTAMP]:${UI_RESET} $*"
+}
+
+ui_banner() {
+  if [[ -t 1 && "${TERM:-dumb}" != dumb ]]; then
+    print -r -- "${UI_ACCENT}${UI_BOLD}✦ quillmit${UI_RESET} ${UI_DIM}· ${REPO:t}${UI_RESET}"
+    print -r -- "${UI_DIM}  $LABEL · $MODEL · $CONTEXT_MODE${UI_RESET}"
+    print -- ""
+  fi
+}
+
 set_progress() {
   local completed="$1"
-  print -r -- "$completed" > "$PROGRESS_FILE"
+  [[ $# -lt 2 ]] || PROGRESS_PHASE="$2"
+  print -rl -- "$completed" "$PROGRESS_PHASE" > "$PROGRESS_FILE.next"
+  mv "$PROGRESS_FILE.next" "$PROGRESS_FILE"
+}
+
+run_timed_provider() {
+  local phase="$1" completed="$2" prompt_file="$3" message_file="$4"
+  local -F started="$SECONDS"
+  local result=0
+  set_progress "$completed" "$phase"
+  run_provider "$prompt_file" "$message_file" || result=$?
+  ui_duration "$((SECONDS - started))"
+  if [[ "$result" -eq 0 ]]; then
+    ui_log "${UI_SUCCESS}✓${UI_RESET} $phase · $UI_DURATION" >> "$PROGRESS_TIMINGS_FILE"
+  else
+    ui_log "${UI_ERROR}✗${UI_RESET} $phase failed · $UI_DURATION" >> "$PROGRESS_TIMINGS_FILE"
+  fi
+  return "$result"
 }
 
 start_progress() {
@@ -908,25 +991,41 @@ start_progress() {
     return
   fi
 
-  if [[ -t 1 ]]; then
-    set_progress 0
+  if [[ -t 1 && "${TERM:-dumb}" != dumb ]]; then
     (
       local tick=0
       local completed
+      local phase
+      local -a progress_state
       local filled
       local remaining
       local marker
       local bar
       local position
+      local width
+      local available
+      local prefix
+      local suffix
       while true; do
-        completed=0
-        [[ -f "$PROGRESS_FILE" ]] && completed="$(<"$PROGRESS_FILE")"
-        filled=$((completed * PROGRESS_WIDTH / PROGRESS_TOTAL))
-        remaining=$((PROGRESS_WIDTH - filled))
+        progress_state=("${(@f)$(<"$PROGRESS_FILE")}")
+        completed="${progress_state[1]:-0}"
+        phase="${progress_state[2]:-Generating}"
+        ui_timestamp
+        ui_duration "$((SECONDS - GENERATION_STARTED))"
+        prefix="[$UI_TIMESTAMP]: $phase "
+        suffix=" $completed/$PROGRESS_TOTAL · $UI_DURATION elapsed"
+        width="$PROGRESS_WIDTH"
+        if (( COLUMNS > 0 )); then
+          available=$((COLUMNS - ${#prefix} - ${#suffix} - 2))
+          (( width <= available )) || width="$available"
+          (( width >= 0 )) || width=0
+        fi
+        filled=$((completed * width / PROGRESS_TOTAL))
+        remaining=$((width - filled))
         marker=0
         [[ "$remaining" -gt 0 ]] && marker=$((filled + tick % remaining + 1))
         bar=""
-        for ((position = 1; position <= PROGRESS_WIDTH; position++)); do
+        for ((position = 1; position <= width; position++)); do
           if [[ "$position" -le "$filled" ]]; then
             bar+="="
           elif [[ "$position" -eq "$marker" ]]; then
@@ -935,36 +1034,45 @@ start_progress() {
             bar+="-"
           fi
         done
-        print -n -- $'\r'"Generating $OUTPUT_NAME with $LABEL [$bar] $completed/$PROGRESS_TOTAL"
+        [[ "$width" -eq 0 ]] || bar="[$bar]"
+        print -rn -- $'\r\e[2K'"${UI_DIM}[$UI_TIMESTAMP]:${UI_RESET} $phase ${UI_ACCENT}$bar${UI_RESET}$suffix"
         tick=$((tick + 1))
         sleep 0.12
       done
     ) &
     PROGRESS_PID="$!"
-  else
-    print -- "Generating $OUTPUT_NAME with $LABEL..."
   fi
 }
 
 stop_progress() {
   local ok="$1"
-  if [[ "$VERBOSE" -eq 1 ]]; then
-    return
-  fi
-
   if [[ -n "$PROGRESS_PID" ]]; then
     kill "$PROGRESS_PID" >/dev/null 2>&1 || true
     wait "$PROGRESS_PID" 2>/dev/null || true
     PROGRESS_PID=""
-    if [[ "$ok" -eq 1 ]]; then
-      local bar=""
-      local position
-      for ((position = 1; position <= PROGRESS_WIDTH; position++)); do bar+="="; done
-      print -- $'\r'"Generated $OUTPUT_NAME with $LABEL [$bar] done"
-    else
-      print -- $'\r'"$LABEL failed while generating the $OUTPUT_NAME."
-    fi
+    print -rn -- $'\r\e[2K'
   fi
+  cat "$PROGRESS_TIMINGS_FILE"
+  ui_duration "$((SECONDS - GENERATION_STARTED))"
+  if [[ "$ok" -eq 1 ]]; then
+    if [[ "$WORKFLOW" == pr ]]; then
+      ui_log "${UI_SUCCESS}✓${UI_RESET} Pull request content ready with $LABEL · $UI_DURATION total"
+    else
+      ui_log "${UI_SUCCESS}✓${UI_RESET} Generated $OUTPUT_NAME with $LABEL · $UI_DURATION total"
+    fi
+  else
+    ui_log "${UI_ERROR}✗${UI_RESET} $LABEL failed while generating the $OUTPUT_NAME · $UI_DURATION total"
+  fi
+}
+
+run_provider_command() {
+  # Wait explicitly so shell signal traps can cancel the supervised process group.
+  python3 "$SCRIPT_DIR/scripts/run-provider.py" "$@" <&0 &
+  ACTIVE_PROVIDER_PID="$!"
+  local result=0
+  wait "$ACTIVE_PROVIDER_PID" || result=$?
+  ACTIVE_PROVIDER_PID=""
+  return "$result"
 }
 
 run_provider_once() {
@@ -989,10 +1097,10 @@ run_provider_once() {
       if [[ -n "$CODEX_SERVICE_TIER" ]]; then
         args+=(-c "service_tier=$CODEX_SERVICE_TIER")
       fi
-      codex "${args[@]}" -o "$message_file" - < "$prompt_file"
+      run_provider_command codex "${args[@]}" -o "$message_file" - < "$prompt_file"
       ;;
     claude)
-      claude \
+      run_provider_command claude \
         --bare \
         -p \
         --model "$model" \
@@ -1001,7 +1109,7 @@ run_provider_once() {
         < "$prompt_file" > "$message_file"
       ;;
     gemini)
-      gemini \
+      run_provider_command gemini \
         -p "Use stdin as the full task. Follow its output instructions exactly." \
         --model "$model" \
         < "$prompt_file" > "$message_file"
@@ -1087,26 +1195,17 @@ run_provider() {
 }
 
 run_batched_provider() {
-  local pids=()
   local batch
   for ((batch = 1; batch <= BATCH_COUNT; batch++)); do
-    run_provider "$TMP_DIR/batch-$batch.prompt" "$TMP_DIR/batch-$batch.summary" > "$TMP_DIR/batch-$batch.log" 2>&1 &
-    pids+=("$!")
-  done
-
-  local failed=0
-  local index=1
-  local pid
-  for pid in "${pids[@]}"; do
-    if ! wait "$pid"; then
-      failed=1
+    local result=0
+    run_timed_provider "Summary $batch/$BATCH_COUNT" "$((batch - 1))" "$TMP_DIR/batch-$batch.prompt" "$TMP_DIR/batch-$batch.summary" > "$TMP_DIR/batch-$batch.log" 2>&1 || result=$?
+    print -- "Batch $batch provider log:"
+    cat "$TMP_DIR/batch-$batch.log"
+    if [[ "$result" -ne 0 ]]; then
+      return "$result"
     fi
-    set_progress "$index"
-    print -- "Batch $index provider log:"
-    cat "$TMP_DIR/batch-$index.log"
-    index=$((index + 1))
+    set_progress "$batch"
   done
-  [[ "$failed" -eq 0 ]] || return 1
 
   write_synthesis_prompt
   local synthesis_bytes
@@ -1115,11 +1214,17 @@ run_batched_provider() {
     print -u2 -- "Synthesis prompt exceeds ${PROVIDER:u}_MAX_PROMPT_BYTES ($synthesis_bytes > $MAX_PROMPT_BYTES)."
     return 1
   fi
-  run_provider "$TMP_DIR/synthesis.prompt" "$MESSAGE_FILE" || return 1
+  run_timed_provider "Final $OUTPUT_NAME" "$BATCH_COUNT" "$TMP_DIR/synthesis.prompt" "$MESSAGE_FILE" || return 1
   set_progress "$PROGRESS_TOTAL"
 }
 
 generate_message() {
+  GENERATION_STARTED="$SECONDS"
+  BATCH_COUNT=0
+  PROGRESS_TOTAL=1
+  : > "$PROGRESS_TIMINGS_FILE"
+  ui_banner
+  ui_log "Reading Git context..."
   rm -f "$FALLBACK_USED_FILE"
   write_git_context
 
@@ -1135,54 +1240,63 @@ generate_message() {
     prompt_kib=$(((prompt_bytes + 1023) / 1024))
     file_word="files"
     [[ "$BATCH_FILE_COUNT" -eq 1 ]] && file_word="file"
-    print -- "Large change detected: $BATCH_FILE_COUNT $file_word, ${prompt_kib} KiB; analyzing in $BATCH_COUNT parallel batches."
+    ui_log "Large change detected: $BATCH_FILE_COUNT $file_word, ${prompt_kib} KiB; analyzing in $BATCH_COUNT sequential batches."
+    PROGRESS_TOTAL=$((BATCH_COUNT + 1))
   fi
+  ui_duration "$((SECONDS - GENERATION_STARTED))"
+  ui_log "${UI_SUCCESS}✓${UI_RESET} Git context · $UI_DURATION"
+  ui_log "Generating $OUTPUT_NAME with $LABEL..."
+  set_progress 0 "Drafting $OUTPUT_NAME"
+  start_progress
 
+  local result=0
   if [[ "$VERBOSE" -eq 1 ]]; then
     if [[ "$batched" -eq 1 ]]; then
-      run_batched_provider
+      run_batched_provider || result=$?
     else
-      run_provider "$PROMPT_FILE" "$MESSAGE_FILE"
+      run_timed_provider "Drafting $OUTPUT_NAME" 0 "$PROMPT_FILE" "$MESSAGE_FILE" || result=$?
     fi
   else
-    if [[ "$batched" -eq 1 ]]; then
-      PROGRESS_TOTAL=$((BATCH_COUNT + 1))
-    else
-      PROGRESS_TOTAL=1
-    fi
-    start_progress
-    if ! {
+    {
       if [[ "$batched" -eq 1 ]]; then
         run_batched_provider
       else
-        run_provider "$PROMPT_FILE" "$MESSAGE_FILE" && set_progress 1
+        run_timed_provider "Drafting $OUTPUT_NAME" 0 "$PROMPT_FILE" "$MESSAGE_FILE" && set_progress 1
       fi
-    } > "$LOG_FILE" 2>&1; then
-      stop_progress 0
-      print -u2 -- "$LABEL failed. Log: $LOG_FILE"
-      return 1
-    fi
-    stop_progress 1
+    } > "$LOG_FILE" 2>&1 || result=$?
   fi
+  if [[ "$result" -ne 0 ]]; then
+    stop_progress 0
+    ui_log "$LABEL failed. Log: $LOG_FILE" >&2
+    return 1
+  fi
+  clean_message
+  stop_progress 1
 
   if [[ -f "$FALLBACK_USED_FILE" ]]; then
     if [[ "$PROVIDER" == "codex" ]]; then
-      print -- "Used $LABEL fallback model: $FALLBACK_MODEL (reasoning: $CODEX_FALLBACK_REASONING_EFFORT)"
+      ui_log "Used $LABEL fallback model: $FALLBACK_MODEL (reasoning: $CODEX_FALLBACK_REASONING_EFFORT)"
     else
-      print -- "Used $LABEL fallback model: $FALLBACK_MODEL"
+      ui_log "Used $LABEL fallback model: $FALLBACK_MODEL"
     fi
   fi
-
-  clean_message
 }
 
 show_message() {
   print -- ""
-  print -- "Generated commit message:"
-  print -- "-------------------------"
-  cat "$MESSAGE_FILE"
+  print -r -- "${UI_ACCENT}── Generated commit message: ──${UI_RESET}"
+  local line
+  local first=1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$first" -eq 1 ]]; then
+      print -r -- "${UI_BOLD}$line${UI_RESET}"
+      first=0
+    else
+      print -r -- "$line"
+    fi
+  done < "$MESSAGE_FILE"
   print -- ""
-  print -- "-------------------------"
+  print -r -- "${UI_ACCENT}──────────────────────────────${UI_RESET}"
 }
 
 commit_message() {
@@ -1192,7 +1306,16 @@ commit_message() {
     return 1
   fi
 
-  git -C "$REPO" commit -F "$MESSAGE_FILE"
+  ui_log "Committing staged changes..."
+  local -F started="$SECONDS"
+  local result=0
+  git -C "$REPO" commit -F "$MESSAGE_FILE" || result=$?
+  ui_duration "$((SECONDS - started))"
+  if [[ "$result" -ne 0 ]]; then
+    ui_log "${UI_ERROR}✗${UI_RESET} Commit failed · $UI_DURATION" >&2
+    return "$result"
+  fi
+  ui_log "${UI_SUCCESS}✓${UI_RESET} Commit created · $UI_DURATION"
 
   if [[ "$PUSH_AFTER_COMMIT" -eq 1 ]]; then
     push_commits
@@ -1200,10 +1323,15 @@ commit_message() {
 }
 
 push_commits() {
+  ui_log "Pushing commits..."
+  local -F started="$SECONDS"
   if ! git -C "$REPO" push; then
-    print -u2 -- "Push failed. Commit remains local."
+    ui_duration "$((SECONDS - started))"
+    ui_log "${UI_ERROR}✗${UI_RESET} Push failed. Commit remains local. · $UI_DURATION" >&2
     return 1
   fi
+  ui_duration "$((SECONDS - started))"
+  ui_log "${UI_SUCCESS}✓${UI_RESET} Push completed · $UI_DURATION"
 }
 
 prepare_message() {
@@ -1211,7 +1339,7 @@ prepare_message() {
   editmsg="$(git -C "$REPO" rev-parse --path-format=absolute --git-path COMMIT_EDITMSG)"
   mkdir -p "$(dirname "$editmsg")"
   cp "$MESSAGE_FILE" "$editmsg"
-  print -- "Prepared commit message at $editmsg"
+  ui_log "Prepared commit message at $editmsg"
 }
 
 copy_message() {
@@ -1232,7 +1360,7 @@ copy_message() {
     return 1
   fi
 
-  print -- "Copied commit message to clipboard"
+  ui_log "Copied commit message to clipboard"
 }
 
 prepare_pull_request() {
@@ -1339,7 +1467,7 @@ case "$MODE" in
     exit 0
     ;;
   quit)
-    print -- "Quit without preparing or committing"
+    ui_log "Quit without preparing or committing"
     exit 0
     ;;
 esac
@@ -1365,7 +1493,7 @@ while true; do
       show_message
       ;;
     q|quit|"")
-      print -- "Quit without committing"
+      ui_log "Quit without committing"
       exit 0
       ;;
     *)

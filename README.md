@@ -218,9 +218,12 @@ message. A single file larger than a batch is split at diff-hunk boundaries,
 with a byte-bounded fallback for an individual oversized hunk.
 
 Before measuring or batching context, Quillmit replaces valid inline Base64 data
-URL payloads with placeholders retaining the media type, encoded byte count, and
-SHA-256 fingerprint. Surrounding code and diff markers are preserved, so asset
-changes remain distinguishable without sending the encoded binary data to AI.
+URL payloads with placeholders retaining the media type, normalized encoded byte
+count, and SHA-256 fingerprint. Filtering recognizes literal JavaScript/JSON
+escapes, HTML entities, percent encoding, omitted padding, whitespace-wrapped
+payloads, and concatenated string literals. Headers and URL fragments, surrounding
+code, string joins, and diff markers are preserved. Bare Base64 and malformed
+data URLs remain untouched. No source code is evaluated.
 This only changes AI context; staged files remain untouched. Commit and PR
 generation use the same filtering and sequential execution. A failed batch stops
 generation before synthesis. Cancellation terminates the active provider process
@@ -316,8 +319,10 @@ on the selected remote and have commits to compare with the current branch.
 If you press Esc from a preview, branch selection opens even when `--base` was
 provided. Provider flags and the optional repository path work in both modes.
 
-After approval, Quillmit calls `gh pr create`, assigns the pull request to you, and lets
-GitHub CLI push or fork the head branch when necessary. Uncommitted changes are
+After approval, Quillmit calls `gh pr create`, assigns the pull request to your
+authenticated GitHub account by default, and lets GitHub CLI push or fork the head
+branch when necessary. Pass `quill pr --no-assignment` to skip assignment and assign
+it yourself on GitHub later. Uncommitted changes are
 not included. Provider and configuration flags remain available, for example
 `quill pr --claude` or `quill pr --config /path/to/quill.config`.
 

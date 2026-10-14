@@ -12,7 +12,7 @@ usage() {
 Usage:
   quill [-a|-c|-p|-f] [--codex|--claude|--gemini|--provider name] [--config file] [repo]
   quill [--prepare|--commit|--copy|--quit|--add|--push|--full|--verbose] [repo]
-  quill pr [--remote name] [--base branch] [--no-preview] [provider options] [repo]
+  quill pr [--remote name] [--base branch] [--no-preview] [--no-assignment] [provider options] [repo]
   quill worktree create [intent] [--branch name] [--from ref] [--remote name] [--no-preview] [--repo path]
   quill worktree list [--repo path]
   quill worktree remove [name|path] [--repo path]
@@ -33,6 +33,7 @@ Commit message examples:
 
 Pull request and worktree examples:
   quill pr                      Select a target and review the PR before creation.
+  quill pr --no-assignment       Create a PR without assigning it to your GitHub account.
   quill pr --remote origin --base main --no-preview
                                 Create a PR without interactive selection or preview.
   quill worktree create "fix retries"
@@ -90,6 +91,7 @@ WHICH_REQUESTED=0
 PR_REMOTE_INPUT=""
 PR_BASE_INPUT=""
 PR_NO_PREVIEW=0
+PR_NO_ASSIGNMENT=0
 WT_ACTION=""
 WT_INPUT=""
 WT_FROM=""
@@ -146,6 +148,11 @@ while [[ $# -gt 0 ]]; do
       fi
       if [[ "$1" == "--remote" ]]; then PR_REMOTE_INPUT="$2"; else PR_BASE_INPUT="$2"; fi
       shift 2
+      ;;
+    --no-assignment)
+      [[ "$WORKFLOW" == "pr" ]] || { print -u2 -- "--no-assignment is only available with quill pr."; exit 1; }
+      PR_NO_ASSIGNMENT=1
+      shift
       ;;
     --no-preview)
       [[ "$WORKFLOW" == "pr" || "$WORKFLOW" == worktree ]] || { print -u2 -- "--no-preview is only available with quill pr or worktree create."; exit 1; }
@@ -1416,11 +1423,15 @@ preview_pull_request() {
 }
 
 create_pull_request() {
+  local -a assignment_args=()
+  if [[ "$PR_NO_ASSIGNMENT" -eq 0 ]]; then
+    assignment_args=(--assignee "@me")
+  fi
   print -- "Creating pull request from $PR_HEAD_BRANCH into $PR_BASE_REPO:$PR_BASE_BRANCH..."
   (cd "$REPO" && gh pr create \
     --repo "$PR_BASE_URL" \
     --base "$PR_BASE_BRANCH" \
-    --assignee "@me" \
+    "${assignment_args[@]}" \
     --title "$PR_TITLE" \
     --body-file "$PR_BODY_FILE")
 }

@@ -135,7 +135,7 @@ def check_payloads(root):
     content = (b'<img src="data:image/png;base64,' + payload + b'">keep surrounding code\n'
                b'<img src="data:image/png;base64,' + other + b'">second asset\n'
                b'<img src="DATA:image/svg+xml;charset=utf-8;BASE64,QUJD">metadata\n'
-               b'plain Base64 stays: QUJD\ninvalid: "data:image/png;base64,invalid"\n'
+               b'plain Base64 stays: QUJD\ninvalid: "data:image/png;base64,invalid!"\n'
                b'ordinary data URI: "data:text/plain,hello"\n')
     repo = staged_repo(root / "assets", {"assets.html": content})
     for provider in ("codex", "claude", "gemini"):
@@ -150,7 +150,7 @@ def check_payloads(root):
             assert str(len(original)).encode() + b" encoded bytes" in prompt
             assert hashlib.sha256(original).hexdigest().encode() in prompt
         for text in (b'">keep surrounding code', b'">second asset', b'plain Base64 stays: QUJD',
-                     b'"data:image/png;base64,invalid"', b'data:text/plain,hello',
+                     b'"data:image/png;base64,invalid!"', b'data:text/plain,hello',
                      b'DATA:image/svg+xml;charset=utf-8;BASE64,[Base64 payload omitted', b'+<img'):
             assert text in prompt, text
     print("PASS: Base64 assets filtered; metadata, fingerprints, code, diff markers and unrelated text preserved across all providers")

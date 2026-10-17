@@ -66,7 +66,9 @@ After a failed attempt, use `--resume` without `--no-bump`.
 2. Record the selected version and base commit under `.git/quill-release/pending`.
 3. Write `VERSION` and run `./scripts/check --live`: syntax, all deterministic
    suites, real fzf terminal tests, and real AI worktree smoke tests. Then verify
-   an isolated installation. Any failure stops before the normal launcher changes.
+   an isolated installation with `QUILLMIT_SKIP_AGENT_GUIDE=1`, leaving agent
+   files and the remembered opt-out untouched. Any failure stops before the
+   normal launcher changes.
 4. Use the checkout's `./quill --add --commit` to commit all working-tree changes.
    For an unpublished prepared version and a clean checkout, reuse HEAD.
 5. Push that commit explicitly to `origin/master`.
@@ -75,7 +77,8 @@ After a failed attempt, use `--resume` without `--no-bump`.
 7. Create the remote tag if absent. Verify that its resolved commit matches the
    release commit, including annotated tags.
 8. Publish with an explicit repository and `--verify-tag`.
-9. Install the published version locally and clear the pending record.
+9. Install the published version locally, refreshing the Agent Guide unless
+   opted out, and clear the pending record.
 
 The installer verifies the dependency before switching the launcher. It removes
 previous recognized packages after switching. Publication stays successful if

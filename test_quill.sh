@@ -4,6 +4,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/quill-test.XXXXXX")"
 trap 'rm -rf "$TMP_ROOT"' EXIT
+export HOME="$TMP_ROOT/home" CODEX_HOME="$TMP_ROOT/codex"
+export XDG_DATA_HOME="$TMP_ROOT/data" XDG_CONFIG_HOME="$TMP_ROOT/config" XDG_CACHE_HOME="$TMP_ROOT/cache"
+mkdir -p "$HOME" "$CODEX_HOME"
 
 fail() {
   print -u2 -- "FAIL: $1"
@@ -1155,7 +1158,7 @@ test_readme_documents_push_and_full_flags() {
 make_install_source() {
   local source="$1"
   mkdir -p "$source/scripts" "$source/third-party" "$source/fake-bin" "$source/archive"
-  cp "$ROOT/quill" "$ROOT/quill.config" "$ROOT/VERSION" "$ROOT/install" "$source/"
+  cp "$ROOT/quill" "$ROOT/quill.config" "$ROOT/QUILLMIT.md" "$ROOT/VERSION" "$ROOT/install" "$source/"
   cp "$ROOT/scripts/setup-deps" "$ROOT/scripts/worktree" "$ROOT/scripts/filter-diff.py" "$ROOT/scripts/run-provider.py" "$ROOT/scripts/parse-pr-draft.py" "$source/scripts/"
   cp "$ROOT/third-party/fzf.LICENSE" "$source/third-party/"
   print -rl -- '#!/bin/sh' 'echo fixture-fzf' > "$source/archive/fzf"
@@ -1179,6 +1182,163 @@ done
 exit 1
 SCRIPT
   chmod +x "$source/fake-bin/curl"
+}
+
+test_install_links_agent_guide_to_existing_global_instructions() {
+  local source="$TMP_ROOT/guide-source" target="$TMP_ROOT/guide-target" output
+  make_install_source "$source"
+  local -x HOME="$target/home" CODEX_HOME="$target/relocated codex"
+  local -x PATH="$source/fake-bin:$PATH"
+  mkdir -p "$HOME/.claude" "$CODEX_HOME"
+  printf 'Keep my instructions.\n\nLiteral $HOME and \\slashes.\n' > "$HOME/.claude/CLAUDE.md"
+  cp "$HOME/.claude/CLAUDE.md" "$target/expected"
+  printf '\n@QUILLMIT.md\n' >> "$target/expected"
+  output="$("$source/install" --bin-dir "$target/bin" --install-root "$target/packages" 2>&1)" || fail "$output"
+  cmp -s "$target/expected" "$HOME/.claude/CLAUDE.md" || fail 'installer changed user instructions'
+  [[ -f "$HOME/.claude/QUILLMIT.md" ]] || fail 'missing Agent Guide'
+  assert_contains "$output" "linked: $HOME/.claude/CLAUDE.md"
+  assert_contains "$output" "skipped (file absent): $CODEX_HOME/AGENTS.md"
+  [[ ! -e "$CODEX_HOME/AGENTS.md" && ! -e "$CODEX_HOME/QUILLMIT.md" && ! -e "$HOME/.codex" ]] || fail 'installer created unused agent configuration'
+}
+
+test_install_refreshes_agent_guide_without_rewriting_existing_links() {
+  local source="$TMP_ROOT/refresh-source" target="$TMP_ROOT/refresh-target" output
+  make_install_source "$source"
+  local -x HOME="$target/home" PATH="$source/fake-bin:$PATH"
+  local -x CODEX_HOME="$HOME/.codex"
+  mkdir -p "$HOME/.claude" "$CODEX_HOME"
+  printf 'Claude instructions without a final newline' > "$HOME/.claude/CLAUDE.md"
+  printf 'Before\n@QUILLMIT.md\n\nAfter without a final newline' > "$CODEX_HOME/AGENTS.md"
+  cp "$CODEX_HOME/AGENTS.md" "$target/expected-codex"
+  printf 'Claude instructions without a final newline\n\n@QUILLMIT.md\n' > "$target/expected-claude"
+  cat > "$target/expected-guide" <<'GUIDE'
+# Quillmit
+
+Use `quill` for commits and PRs instead of writing messages yourself.
+
+- Commit: stage what you want, then `quill -c`. `quill -a -c` stages everything first.
+- Push: add `-p`. `quill -f` stages all, commits and pushes. Push only when your other instructions allow it.
+- PR: `quill pr --base <branch> --no-preview`. Add `--closes 12,13` to close issues and `--prompt "<focus>"` to steer the description. Add `--remote <name>` if the repo has several remotes.
+- Never run plain `quill` or `quill pr` without these flags: they wait for a terminal prompt.
+GUIDE
+  "$source/install" --bin-dir "$target/bin" --install-root "$target/packages" >/dev/null 2>&1
+  print -- stale > "$CODEX_HOME/QUILLMIT.md"
+  print -- stale > "$HOME/.claude/QUILLMIT.md"
+  output="$("$source/install" --bin-dir "$target/bin" --install-root "$target/packages" 2>&1)" || fail "$output"
+  local instructions
+  for instructions in "$HOME/.claude/CLAUDE.md" "$CODEX_HOME/AGENTS.md"; do
+    assert_contains "$output" "refreshed: $instructions"
+    cmp -s "$target/expected-guide" "${instructions:h}/QUILLMIT.md" || fail 'Agent Guide text differs from the spec'
+  done
+  cmp -s "$target/expected-codex" "$CODEX_HOME/AGENTS.md" || fail 'moved link changed user content'
+  cmp -s "$target/expected-claude" "$HOME/.claude/CLAUDE.md" || fail 'reinstall duplicated the link'
+  local version="$(<"$source/VERSION")"
+  cmp -s "$target/expected-guide" "$target/packages/versions/$version/QUILLMIT.md" || fail 'guide missing from package'
+  print -- changed >> "$source/QUILLMIT.md"
+  if output="$("$source/install" --bin-dir "$target/bin" --install-root "$target/packages" 2>&1)"; then
+    fail 'accepted changed Agent Guide bytes under the same version'
+  fi
+  assert_contains "$output" 'Bump VERSION before installing changed release bytes'
+}
+
+test_install_warns_about_codex_override_without_writing_it() {
+  local source="$TMP_ROOT/override-source" target="$TMP_ROOT/override-target" output
+  make_install_source "$source"
+  local -x HOME="$target/home" CODEX_HOME="$target/codex" PATH="$source/fake-bin:$PATH"
+  mkdir -p "$CODEX_HOME"
+  : > "$CODEX_HOME/AGENTS.md"
+  printf 'Temporary instructions without a newline' > "$CODEX_HOME/AGENTS.override.md"
+  cp "$CODEX_HOME/AGENTS.override.md" "$target/expected-override"
+  output="$("$source/install" --bin-dir "$target/bin" --install-root "$target/packages" 2>&1)" || fail "$output"
+  assert_contains "$output" 'Codex ignores AGENTS.md'
+  assert_contains "$output" "$CODEX_HOME/AGENTS.override.md"
+  cmp -s "$target/expected-override" "$CODEX_HOME/AGENTS.override.md" || fail 'installer changed the override'
+  output="$("$source/install" --bin-dir "$target/bin" --install-root "$target/packages" --no-agent-guide 2>&1)" || fail "$output"
+  assert_contains "$output" 'Codex ignores AGENTS.md'
+  output="$("$source/install" --bin-dir "$target/bin" --install-root "$target/packages" 2>&1)" || fail "$output"
+  assert_contains "$output" 'Codex ignores AGENTS.md'
+  cmp -s "$target/expected-override" "$CODEX_HOME/AGENTS.override.md" || fail 'opt-out changed the override'
+  printf ' \t\n' > "$CODEX_HOME/AGENTS.override.md"
+  cp "$CODEX_HOME/AGENTS.override.md" "$target/expected-override"
+  output="$("$source/install" --bin-dir "$target/bin" --install-root "$target/packages" 2>&1)" || fail "$output"
+  assert_not_contains "$output" 'Codex ignores AGENTS.md'
+  cmp -s "$target/expected-override" "$CODEX_HOME/AGENTS.override.md" || fail 'installer changed the blank override'
+}
+
+test_install_remembers_agent_guide_opt_out_across_versions() {
+  local source="$TMP_ROOT/opt-out-source" target="$TMP_ROOT/opt-out-target" output instructions
+  make_install_source "$source"
+  local -x HOME="$target/home" CODEX_HOME="$target/codex" PATH="$source/fake-bin:$PATH"
+  mkdir -p "$HOME/.claude" "$CODEX_HOME"
+  : > "$HOME/.claude/CLAUDE.md"
+  : > "$CODEX_HOME/AGENTS.md"
+  "$source/install" --bin-dir "$target/bin" --install-root "$target/packages" >/dev/null 2>&1
+  printf '\n@QUILLMIT.md\nTail without a newline' > "$HOME/.claude/CLAUDE.md"
+  printf 'Keep\r\n@QUILLMIT.md \n @QUILLMIT.md\n\n@QUILLMIT.md\nAfter\\literal\n@QUILLMIT.md' > "$CODEX_HOME/AGENTS.md"
+  printf 'Keep\r\n@QUILLMIT.md \n @QUILLMIT.md\n\nAfter\\literal\n' > "$target/expected"
+  output="$("$source/install" --bin-dir "$target/bin" --install-root "$target/packages" --no-agent-guide 2>&1)" || fail "$output"
+  for instructions in "$HOME/.claude/CLAUDE.md" "$CODEX_HOME/AGENTS.md"; do
+    assert_contains "$output" "removed: $instructions"
+    [[ ! -e "${instructions:h}/QUILLMIT.md" ]] || fail 'opt-out left an Agent Guide'
+  done
+  cmp -s "$target/expected" "$CODEX_HOME/AGENTS.md" || fail 'opt-out removed more than exact link lines'
+  printf '\nTail without a newline' > "$target/expected-claude"
+  cmp -s "$target/expected-claude" "$HOME/.claude/CLAUDE.md" || fail 'opt-out removed the separating blank line'
+  # A new release must leave even user-restored links and guides alone.
+  printf 'User-owned text without a newline' >> "$CODEX_HOME/AGENTS.md"
+  cp "$CODEX_HOME/AGENTS.md" "$target/expected"
+  print -- 'Keep while opted out' > "$CODEX_HOME/QUILLMIT.md"
+  cp "$CODEX_HOME/QUILLMIT.md" "$target/expected-guide"
+  print -- '99.0.0' > "$source/VERSION"
+  output="$("$source/install" --bin-dir "$target/bin" --install-root "$target/packages" 2>&1)" || fail "$output"
+  assert_contains "$output" "skipped (opted out): $CODEX_HOME/AGENTS.md"
+  cmp -s "$target/expected" "$CODEX_HOME/AGENTS.md" || fail 'upgrade ignored remembered opt-out'
+  cmp -s "$target/expected-guide" "$CODEX_HOME/QUILLMIT.md" || fail 'upgrade touched an opted-out guide'
+  [[ ! -e "$HOME/.claude/QUILLMIT.md" ]] || fail 'upgrade re-linked an opted-out guide'
+  output="$("$source/install" --bin-dir "$target/bin" --install-root "$target/packages" --agent-guide 2>&1)" || fail "$output"
+  assert_contains "$output" "linked: $CODEX_HOME/AGENTS.md"
+  "$source/install" --bin-dir "$target/bin" --install-root "$target/packages" >/dev/null 2>&1
+  for instructions in "$HOME/.claude/CLAUDE.md" "$CODEX_HOME/AGENTS.md"; do
+    cmp -s "$source/QUILLMIT.md" "${instructions:h}/QUILLMIT.md" || fail 'opt-in failed to restore guide'
+    assert_equals "$(grep -Fxc '@QUILLMIT.md' "$instructions")" 1
+  done
+}
+
+test_install_rejects_conflicting_agent_guide_flags() {
+  local source="$TMP_ROOT/conflict-source" target="$TMP_ROOT/conflict-target" output first second
+  make_install_source "$source"
+  local -x HOME="$target/home" CODEX_HOME="$target/codex" PATH="$source/fake-bin:$PATH"
+  for first second in --agent-guide --no-agent-guide --no-agent-guide --agent-guide; do
+    if output="$("$source/install" --bin-dir "$target/bin" --install-root "$target/packages" "$first" "$second" 2>&1)"; then
+      fail 'accepted conflicting Agent Guide flags'
+    fi
+    assert_contains "$output" 'mutually exclusive'
+  done
+  [[ ! -e "$target" ]] || fail 'conflicting flags caused installation writes'
+}
+
+test_install_can_skip_agent_files_without_changing_remembered_preference() {
+  local source="$TMP_ROOT/skip-source" target="$TMP_ROOT/skip-target" output
+  make_install_source "$source"
+  local -x HOME="$target/home" CODEX_HOME="$target/codex" PATH="$source/fake-bin:$PATH"
+  mkdir -p "$HOME/.claude" "$CODEX_HOME"
+  printf 'Leave instructions alone' > "$CODEX_HOME/AGENTS.md"
+  print -- 'Leave guide alone' > "$CODEX_HOME/QUILLMIT.md"
+  cp "$CODEX_HOME/AGENTS.md" "$target/expected-instructions"
+  cp "$CODEX_HOME/QUILLMIT.md" "$target/expected-guide"
+  output="$(QUILLMIT_SKIP_AGENT_GUIDE=1 "$source/install" --bin-dir "$target/bin" --install-root "$target/packages" 2>&1)" || fail "$output"
+  assert_contains "$output" "skipped (this run): $CODEX_HOME/AGENTS.md"
+  cmp -s "$target/expected-instructions" "$CODEX_HOME/AGENTS.md" || fail 'check install touched instructions'
+  cmp -s "$target/expected-guide" "$CODEX_HOME/QUILLMIT.md" || fail 'check install touched guide'
+  [[ ! -e "$HOME/.claude/CLAUDE.md" && ! -e "$HOME/.claude/QUILLMIT.md" ]] || fail 'check install created agent files'
+  "$source/install" --bin-dir "$target/bin" --install-root "$target/packages" >/dev/null 2>&1
+  grep -Fxq '@QUILLMIT.md' "$CODEX_HOME/AGENTS.md" || fail 'check install recorded an opt-out'
+  "$source/install" --bin-dir "$target/bin" --install-root "$target/packages" --no-agent-guide >/dev/null 2>&1
+  cp "$CODEX_HOME/AGENTS.md" "$target/expected-instructions"
+  QUILLMIT_SKIP_AGENT_GUIDE=1 "$source/install" --bin-dir "$target/bin" --install-root "$target/packages" --agent-guide >/dev/null 2>&1
+  "$source/install" --bin-dir "$target/bin" --install-root "$target/packages" >/dev/null 2>&1
+  cmp -s "$target/expected-instructions" "$CODEX_HOME/AGENTS.md" || fail 'check install cleared an existing opt-out'
+  [[ ! -e "$CODEX_HOME/QUILLMIT.md" ]] || fail 'check install restored an opted-out guide'
 }
 
 test_pr_scripted_validation() {
@@ -1507,6 +1667,12 @@ test_push_failure_leaves_local_commit
 test_push_rejects_non_commit_modes_before_generation
 test_full_rejects_non_commit_modes_regardless_of_order
 test_readme_documents_push_and_full_flags
+test_install_links_agent_guide_to_existing_global_instructions
+test_install_refreshes_agent_guide_without_rewriting_existing_links
+test_install_warns_about_codex_override_without_writing_it
+test_install_remembers_agent_guide_opt_out_across_versions
+test_install_rejects_conflicting_agent_guide_flags
+test_install_can_skip_agent_files_without_changing_remembered_preference
 test_install_copies_versioned_quill_package
 test_version_script_supports_semantic_bumps
 test_version_and_deploy_reject_multiple_bump_flags

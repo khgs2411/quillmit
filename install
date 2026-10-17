@@ -5,12 +5,15 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BIN_DIR="$HOME/.local/bin"
 INSTALL_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/quillmit"
 VERSION="$(tr -d '[:space:]' < "$SCRIPT_DIR/VERSION")"
+AGENT_GUIDE=""
 
 usage() {
   cat <<'TEXT'
-Usage: install [--bin-dir dir] [--install-root dir]
+Usage: install [--bin-dir dir] [--install-root dir] [--agent-guide|--no-agent-guide]
 
 Install the current Quillmit version as a copied, versioned package.
+Link the Agent Guide into existing global instructions by default.
+--no-agent-guide removes it and remembers the opt-out; --agent-guide opts back in.
 TEXT
 }
 
@@ -25,6 +28,14 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 && -n "$2" && "$2" != -* ]] || { print -u2 -- "--install-root requires a directory."; exit 1; }
       INSTALL_ROOT="$2"
       shift 2
+      ;;
+    --agent-guide|--no-agent-guide)
+      if [[ -n "$AGENT_GUIDE" && "$AGENT_GUIDE" != "$1" ]]; then
+        print -u2 -- "--agent-guide and --no-agent-guide are mutually exclusive."
+        exit 1
+      fi
+      AGENT_GUIDE="$1"
+      shift
       ;;
     -h|--help)
       usage
@@ -51,7 +62,7 @@ if [[ -z "$VERSION" || "$VERSION" == *[!0-9A-Za-z._-]* ]]; then
   exit 1
 fi
 
-for source_file in quill quill.config VERSION scripts/setup-deps scripts/worktree scripts/filter-diff.py scripts/run-provider.py scripts/parse-pr-draft.py third-party/fzf.lock third-party/fzf.LICENSE; do
+for source_file in quill quill.config QUILLMIT.md VERSION scripts/setup-deps scripts/worktree scripts/filter-diff.py scripts/run-provider.py scripts/parse-pr-draft.py third-party/fzf.lock third-party/fzf.LICENSE; do
   if [[ ! -f "$SCRIPT_DIR/$source_file" ]]; then
     print -u2 -- "Missing install source: $SCRIPT_DIR/$source_file"
     exit 1
@@ -83,7 +94,8 @@ fi
 VERSION_DIR="$INSTALL_ROOT/versions/$VERSION"
 STAGING_DIR="$INSTALL_ROOT/.install-$VERSION-$$"
 launcher_tmp="$LAUNCHER_PATH.tmp-$$"
-trap 'rm -rf "$STAGING_DIR"; rm -f "$launcher_tmp"' EXIT
+guide_tmp=""
+trap 'rm -rf "$STAGING_DIR"; rm -f "$launcher_tmp"; [[ -z "$guide_tmp" ]] || rm -f "$guide_tmp"' EXIT
 
 mkdir -p "$BIN_DIR" "$INSTALL_ROOT/versions"
 
@@ -93,6 +105,7 @@ cp "$SCRIPT_DIR/scripts/worktree" "$STAGING_DIR/scripts/worktree"
 cp "$SCRIPT_DIR/scripts/filter-diff.py" "$SCRIPT_DIR/scripts/run-provider.py" "$SCRIPT_DIR/scripts/parse-pr-draft.py" "$STAGING_DIR/scripts/"
 cp "$SCRIPT_DIR/quill" "$STAGING_DIR/quill"
 cp "$SCRIPT_DIR/quill.config" "$STAGING_DIR/quill.config"
+cp "$SCRIPT_DIR/QUILLMIT.md" "$STAGING_DIR/QUILLMIT.md"
 cp "$SCRIPT_DIR/VERSION" "$STAGING_DIR/VERSION"
 chmod 755 "$STAGING_DIR/quill"
 zsh "$SCRIPT_DIR/scripts/setup-deps" "$STAGING_DIR/.deps/fzf"
@@ -106,6 +119,7 @@ if [[ -e "$VERSION_DIR" ]]; then
   if [[ ! -f "$VERSION_DIR/quill" || ! -f "$VERSION_DIR/quill.config" || ! -f "$VERSION_DIR/VERSION" ]] || \
      ! cmp -s "$SCRIPT_DIR/quill" "$VERSION_DIR/quill" || \
      ! cmp -s "$SCRIPT_DIR/quill.config" "$VERSION_DIR/quill.config" || \
+     ! cmp -s "$SCRIPT_DIR/QUILLMIT.md" "$VERSION_DIR/QUILLMIT.md" || \
      ! cmp -s "$SCRIPT_DIR/VERSION" "$VERSION_DIR/VERSION" || \
      ! cmp -s "$SCRIPT_DIR/scripts/worktree" "$VERSION_DIR/scripts/worktree" || \
      ! cmp -s "$SCRIPT_DIR/scripts/filter-diff.py" "$VERSION_DIR/scripts/filter-diff.py" || \
@@ -163,6 +177,66 @@ for installed_dir in "$INSTALL_ROOT/versions"/*(N); do
   rm -rf -- "$installed_dir"
   print -- "Removed Quillmit $installed_version -> $installed_dir"
 done
+
+guide_opt_out="$INSTALL_ROOT/agent-guide-disabled"
+for instructions in "$HOME/.claude/CLAUDE.md" "${CODEX_HOME:-$HOME/.codex}/AGENTS.md"; do
+  if [[ "${QUILLMIT_SKIP_AGENT_GUIDE:-}" == 1 ]]; then
+    print -- "Agent Guide skipped (this run): $instructions"
+    continue
+  fi
+  if [[ -z "$AGENT_GUIDE" && -e "$guide_opt_out" ]]; then
+    print -- "Agent Guide skipped (opted out): $instructions"
+    continue
+  fi
+  if [[ ! -f "$instructions" ]]; then
+    print -- "Agent Guide skipped (file absent): $instructions"
+    continue
+  fi
+  if [[ "$AGENT_GUIDE" == --no-agent-guide ]]; then
+    if grep -Fxq '@QUILLMIT.md' "$instructions"; then
+      guide_tmp="$(mktemp "${TMPDIR:-/tmp}/quill-agent-guide.XXXXXX")"
+      # Preserve every other byte, including a final line without a newline.
+      {
+        while IFS= read -r guide_line; do
+          if [[ "$guide_line" != '@QUILLMIT.md' ]]; then
+            print -r -- "$guide_line"
+          fi
+        done
+        if [[ -n "$guide_line" && "$guide_line" != '@QUILLMIT.md' ]]; then
+          printf '%s' "$guide_line"
+        fi
+      } < "$instructions" > "$guide_tmp"
+      cat "$guide_tmp" > "$instructions"
+      rm "$guide_tmp"
+      guide_tmp=""
+    fi
+    rm -f "${instructions:h}/QUILLMIT.md"
+    print -- "Agent Guide removed: $instructions"
+    continue
+  fi
+  cp "$VERSION_DIR/QUILLMIT.md" "${instructions:h}/QUILLMIT.md"
+  if grep -Fxq '@QUILLMIT.md' "$instructions"; then
+    print -- "Agent Guide refreshed: $instructions"
+  else
+    # Terminate an existing last line before adding the separating blank line.
+    if [[ -s "$instructions" && -n "$(tail -c 1 "$instructions")" ]]; then
+      print >> "$instructions"
+    fi
+    print -r -- $'\n@QUILLMIT.md' >> "$instructions"
+    print -- "Agent Guide linked: $instructions"
+  fi
+done
+
+if [[ "${QUILLMIT_SKIP_AGENT_GUIDE:-}" != 1 ]]; then
+  case "$AGENT_GUIDE" in
+    --no-agent-guide) touch "$guide_opt_out" ;;
+    --agent-guide) rm -f "$guide_opt_out" ;;
+  esac
+fi
+codex_override="${CODEX_HOME:-$HOME/.codex}/AGENTS.override.md"
+if [[ "${QUILLMIT_SKIP_AGENT_GUIDE:-}" != 1 && -f "$codex_override" ]] && LC_ALL=C grep -q '[^[:space:]]' "$codex_override"; then
+  print -u2 -- "Warning: Codex ignores AGENTS.md and the Agent Guide while $codex_override is non-blank."
+fi
 
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;

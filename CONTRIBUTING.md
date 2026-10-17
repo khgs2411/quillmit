@@ -106,11 +106,15 @@ do not prove visual quality in every terminal.
 To check a package without replacing your normal installation:
 
 ```sh
-./install --bin-dir ./tmp/install/bin --install-root ./tmp/install/packages
+QUILLMIT_SKIP_AGENT_GUIDE=1 ./install --bin-dir ./tmp/install/bin --install-root ./tmp/install/packages
 ./tmp/install/bin/quill --version
 ```
 
-This downloads the pinned dependency. `tmp/` is ignored. Reusing a version with
+This downloads the pinned dependency. `QUILLMIT_SKIP_AGENT_GUIDE=1` skips agent
+files for this run without changing the remembered opt-out. The deploy check
+install uses the same mechanism; its final local install refreshes the guide
+unless you opted out. Installer tests isolate both `HOME` and `CODEX_HOME`.
+`tmp/` is ignored. Reusing a version with
 different bytes is refused; remove only this disposable installation before
 repeating the check with changed code. The end-user installer does not run tests
 or require AI authentication; maintainers must pass the release gate first.
@@ -129,6 +133,7 @@ Keep the downloaded binary out of Git. Commit the lock file and license.
 | `quill` | CLI parsing, provider calls, commit and PR workflows |
 | `scripts/worktree` | Worktree creation, inspection, and removal checks |
 | `quill.config` | Packaged provider defaults |
+| `QUILLMIT.md` | Packaged Agent Guide, refreshed beside existing Global Instructions Files |
 | `scripts/setup-deps`, `third-party/` | Pinned TUI binary and license |
 | `scripts/check`, `test_*` | Verification entry point and suites |
 | `install`, `deploy`, `scripts/version` | Installation, publication, and version selection |

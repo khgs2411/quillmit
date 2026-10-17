@@ -135,7 +135,7 @@ existing_tag="$(remote_tag_commit)"
 [[ -z "$existing_tag" || ( -n "$release_commit" && "$existing_tag" == "$release_commit" ) ]] || fail "Tag $tag does not match this release commit."
 print -- "Verifying Quillmit $release_version for $github_repo..."
 ./scripts/check --live
-./install --bin-dir "$check_dir/bin" --install-root "$check_dir/packages"
+QUILLMIT_SKIP_AGENT_GUIDE=1 ./install --bin-dir "$check_dir/bin" --install-root "$check_dir/packages"
 "$check_dir/bin/quill" --version
 if [[ -z "$release_commit" ]]; then
   ./quill --add --commit "$ROOT"

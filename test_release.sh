@@ -36,12 +36,14 @@ SCRIPT
 #!/bin/zsh
 set -eu
 if [[ $# -gt 0 ]]; then
+  [[ "${QUILLMIT_SKIP_AGENT_GUIDE:-}" == 1 && $# -eq 4 && "$1" == --bin-dir && "$3" == --install-root ]] || exit 92
   print -- verify-package >> "$RELEASE_CASE/events"
   [[ "${FAIL_VERIFY:-0}" == 0 ]] || exit 1
   mkdir -p "$2"
   print -rl -- '#!/bin/sh' 'echo quill-fixture' > "$2/quill"
   chmod +x "$2/quill"
 else
+  [[ -z "${QUILLMIT_SKIP_AGENT_GUIDE:-}" ]] || exit 93
   [[ -f "$RELEASE_CASE/published" ]] || exit 81
   [[ "${FAIL_INSTALL:-0}" == 0 ]] || exit 1
   print -- install >> "$RELEASE_CASE/events"
@@ -102,7 +104,7 @@ SCRIPT
 }
 run_release() {
   # Invoke from outside the checkout and with a conflicting caller GH_REPO.
-  (cd "$TMP_ROOT" && RELEASE_CASE="$CASE" GH_REPO=wrong/repo PATH="$CASE/bin:$PATH" "$CASE/repo/deploy" "$@") > "$CASE/output" 2>&1
+  (cd "$TMP_ROOT" && HOME="$CASE/home" CODEX_HOME="$CASE/codex" RELEASE_CASE="$CASE" GH_REPO=wrong/repo PATH="$CASE/bin:$PATH" "$CASE/repo/deploy" "$@") > "$CASE/output" 2>&1
 }
 expect_failure() {
   if run_release "$@"; then fail 'expected release failure'; fi

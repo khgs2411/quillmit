@@ -179,6 +179,7 @@ for installed_dir in "$INSTALL_ROOT/versions"/*(N); do
 done
 
 guide_opt_out="$INSTALL_ROOT/agent-guide-disabled"
+guide_link_pattern='^@QUILLMIT\.md[[:space:]]*$'
 for instructions in "$HOME/.claude/CLAUDE.md" "${CODEX_HOME:-$HOME/.codex}/AGENTS.md"; do
   if [[ "${QUILLMIT_SKIP_AGENT_GUIDE:-}" == 1 ]]; then
     print -- "Agent Guide skipped (this run): $instructions"
@@ -193,16 +194,16 @@ for instructions in "$HOME/.claude/CLAUDE.md" "${CODEX_HOME:-$HOME/.codex}/AGENT
     continue
   fi
   if [[ "$AGENT_GUIDE" == --no-agent-guide ]]; then
-    if grep -Fxq '@QUILLMIT.md' "$instructions"; then
+    if grep -Eq "$guide_link_pattern" "$instructions"; then
       guide_tmp="$(mktemp "${TMPDIR:-/tmp}/quill-agent-guide.XXXXXX")"
       # Preserve every other byte, including a final line without a newline.
       {
         while IFS= read -r guide_line; do
-          if [[ "$guide_line" != '@QUILLMIT.md' ]]; then
+          if [[ ! "$guide_line" =~ $guide_link_pattern ]]; then
             print -r -- "$guide_line"
           fi
         done
-        if [[ -n "$guide_line" && "$guide_line" != '@QUILLMIT.md' ]]; then
+        if [[ -n "$guide_line" && ! "$guide_line" =~ $guide_link_pattern ]]; then
           printf '%s' "$guide_line"
         fi
       } < "$instructions" > "$guide_tmp"
@@ -215,7 +216,7 @@ for instructions in "$HOME/.claude/CLAUDE.md" "${CODEX_HOME:-$HOME/.codex}/AGENT
     continue
   fi
   cp "$VERSION_DIR/QUILLMIT.md" "${instructions:h}/QUILLMIT.md"
-  if grep -Fxq '@QUILLMIT.md' "$instructions"; then
+  if grep -Eq "$guide_link_pattern" "$instructions"; then
     print -- "Agent Guide refreshed: $instructions"
   else
     # Terminate an existing last line before adding the separating blank line.
@@ -225,6 +226,12 @@ for instructions in "$HOME/.claude/CLAUDE.md" "${CODEX_HOME:-$HOME/.codex}/AGENT
     print -r -- $'\n@QUILLMIT.md' >> "$instructions"
     print -- "Agent Guide linked: $instructions"
   fi
+  if [[ "$instructions" == "${CODEX_HOME:-$HOME/.codex}/AGENTS.md" ]]; then
+    codex_override="${instructions:h}/AGENTS.override.md"
+    if [[ -f "$codex_override" ]] && LC_ALL=C grep -q '[^[:space:]]' "$codex_override"; then
+      print -u2 -- "Warning: Codex ignores AGENTS.md and the Agent Guide while $codex_override is non-blank."
+    fi
+  fi
 done
 
 if [[ "${QUILLMIT_SKIP_AGENT_GUIDE:-}" != 1 ]]; then
@@ -233,11 +240,6 @@ if [[ "${QUILLMIT_SKIP_AGENT_GUIDE:-}" != 1 ]]; then
     --agent-guide) rm -f "$guide_opt_out" ;;
   esac
 fi
-codex_override="${CODEX_HOME:-$HOME/.codex}/AGENTS.override.md"
-if [[ "${QUILLMIT_SKIP_AGENT_GUIDE:-}" != 1 && -f "$codex_override" ]] && LC_ALL=C grep -q '[^[:space:]]' "$codex_override"; then
-  print -u2 -- "Warning: Codex ignores AGENTS.md and the Agent Guide while $codex_override is non-blank."
-fi
-
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
   *) print -u2 -- "$BIN_DIR is not on PATH. Add it to your shell PATH before invoking quill globally." ;;

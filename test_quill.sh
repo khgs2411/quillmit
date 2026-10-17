@@ -1201,6 +1201,22 @@ test_install_links_agent_guide_to_existing_global_instructions() {
   [[ ! -e "$CODEX_HOME/AGENTS.md" && ! -e "$CODEX_HOME/QUILLMIT.md" && ! -e "$HOME/.codex" ]] || fail 'installer created unused agent configuration'
 }
 
+test_install_detects_agent_guide_links_with_trailing_whitespace() {
+  local source="$TMP_ROOT/whitespace-source" target="$TMP_ROOT/whitespace-target" output
+  make_install_source "$source"
+  local -x HOME="$target/home" CODEX_HOME="$target/codex" PATH="$source/fake-bin:$PATH"
+  mkdir -p "$HOME/.claude" "$CODEX_HOME"
+  printf 'Before\n@QUILLMIT.md \t\nAfter without a newline' > "$HOME/.claude/CLAUDE.md"
+  printf 'Before\r\n@QUILLMIT.md\r\nAfter\r\n' > "$CODEX_HOME/AGENTS.md"
+  cp "$HOME/.claude/CLAUDE.md" "$target/expected-claude"
+  cp "$CODEX_HOME/AGENTS.md" "$target/expected-codex"
+  output="$("$source/install" --bin-dir "$target/bin" --install-root "$target/packages" 2>&1)" || fail "$output"
+  assert_contains "$output" "refreshed: $HOME/.claude/CLAUDE.md"
+  assert_contains "$output" "refreshed: $CODEX_HOME/AGENTS.md"
+  cmp -s "$target/expected-claude" "$HOME/.claude/CLAUDE.md" || fail 'duplicated trailing-whitespace link'
+  cmp -s "$target/expected-codex" "$CODEX_HOME/AGENTS.md" || fail 'duplicated CRLF link'
+}
+
 test_install_refreshes_agent_guide_without_rewriting_existing_links() {
   local source="$TMP_ROOT/refresh-source" target="$TMP_ROOT/refresh-target" output
   make_install_source "$source"
@@ -1218,6 +1234,7 @@ Use `quill` for commits and PRs instead of writing messages yourself.
 
 - Commit: stage what you want, then `quill -c`. `quill -a -c` stages everything first.
 - Push: add `-p`. `quill -f` stages all, commits and pushes. Push only when your other instructions allow it.
+- `-p` only pushes a commit quill just made. To push existing commits, run `git push` (when allowed).
 - PR: `quill pr --base <branch> --no-preview`. Add `--closes 12,13` to close issues and `--prompt "<focus>"` to steer the description. Add `--remote <name>` if the repo has several remotes.
 - Never run plain `quill` or `quill pr` without these flags: they wait for a terminal prompt.
 GUIDE
@@ -1253,16 +1270,24 @@ test_install_warns_about_codex_override_without_writing_it() {
   assert_contains "$output" 'Codex ignores AGENTS.md'
   assert_contains "$output" "$CODEX_HOME/AGENTS.override.md"
   cmp -s "$target/expected-override" "$CODEX_HOME/AGENTS.override.md" || fail 'installer changed the override'
-  output="$("$source/install" --bin-dir "$target/bin" --install-root "$target/packages" --no-agent-guide 2>&1)" || fail "$output"
-  assert_contains "$output" 'Codex ignores AGENTS.md'
   output="$("$source/install" --bin-dir "$target/bin" --install-root "$target/packages" 2>&1)" || fail "$output"
+  assert_contains "$output" "refreshed: $CODEX_HOME/AGENTS.md"
   assert_contains "$output" 'Codex ignores AGENTS.md'
+  output="$("$source/install" --bin-dir "$target/bin" --install-root "$target/packages" --no-agent-guide 2>&1)" || fail "$output"
+  assert_not_contains "$output" 'Codex ignores AGENTS.md'
+  output="$("$source/install" --bin-dir "$target/bin" --install-root "$target/packages" 2>&1)" || fail "$output"
+  assert_not_contains "$output" 'Codex ignores AGENTS.md'
   cmp -s "$target/expected-override" "$CODEX_HOME/AGENTS.override.md" || fail 'opt-out changed the override'
   printf ' \t\n' > "$CODEX_HOME/AGENTS.override.md"
   cp "$CODEX_HOME/AGENTS.override.md" "$target/expected-override"
-  output="$("$source/install" --bin-dir "$target/bin" --install-root "$target/packages" 2>&1)" || fail "$output"
+  output="$("$source/install" --bin-dir "$target/bin" --install-root "$target/packages" --agent-guide 2>&1)" || fail "$output"
   assert_not_contains "$output" 'Codex ignores AGENTS.md'
   cmp -s "$target/expected-override" "$CODEX_HOME/AGENTS.override.md" || fail 'installer changed the blank override'
+  printf 'Temporary instructions' > "$CODEX_HOME/AGENTS.override.md"
+  rm "$CODEX_HOME/AGENTS.md"
+  output="$("$source/install" --bin-dir "$target/bin" --install-root "$target/packages" 2>&1)" || fail "$output"
+  assert_contains "$output" "skipped (file absent): $CODEX_HOME/AGENTS.md"
+  assert_not_contains "$output" 'Codex ignores AGENTS.md'
 }
 
 test_install_remembers_agent_guide_opt_out_across_versions() {
@@ -1274,14 +1299,14 @@ test_install_remembers_agent_guide_opt_out_across_versions() {
   : > "$CODEX_HOME/AGENTS.md"
   "$source/install" --bin-dir "$target/bin" --install-root "$target/packages" >/dev/null 2>&1
   printf '\n@QUILLMIT.md\nTail without a newline' > "$HOME/.claude/CLAUDE.md"
-  printf 'Keep\r\n@QUILLMIT.md \n @QUILLMIT.md\n\n@QUILLMIT.md\nAfter\\literal\n@QUILLMIT.md' > "$CODEX_HOME/AGENTS.md"
-  printf 'Keep\r\n@QUILLMIT.md \n @QUILLMIT.md\n\nAfter\\literal\n' > "$target/expected"
+  printf 'Keep\r\n@QUILLMIT.md \t\n @QUILLMIT.md\n\n@QUILLMIT.md\r\nAfter\\literal\n@QUILLMIT.md \t\r' > "$CODEX_HOME/AGENTS.md"
+  printf 'Keep\r\n @QUILLMIT.md\n\nAfter\\literal\n' > "$target/expected"
   output="$("$source/install" --bin-dir "$target/bin" --install-root "$target/packages" --no-agent-guide 2>&1)" || fail "$output"
   for instructions in "$HOME/.claude/CLAUDE.md" "$CODEX_HOME/AGENTS.md"; do
     assert_contains "$output" "removed: $instructions"
     [[ ! -e "${instructions:h}/QUILLMIT.md" ]] || fail 'opt-out left an Agent Guide'
   done
-  cmp -s "$target/expected" "$CODEX_HOME/AGENTS.md" || fail 'opt-out removed more than exact link lines'
+  cmp -s "$target/expected" "$CODEX_HOME/AGENTS.md" || fail 'opt-out did not remove only link lines'
   printf '\nTail without a newline' > "$target/expected-claude"
   cmp -s "$target/expected-claude" "$HOME/.claude/CLAUDE.md" || fail 'opt-out removed the separating blank line'
   # A new release must leave even user-restored links and guides alone.
@@ -1668,6 +1693,7 @@ test_push_rejects_non_commit_modes_before_generation
 test_full_rejects_non_commit_modes_regardless_of_order
 test_readme_documents_push_and_full_flags
 test_install_links_agent_guide_to_existing_global_instructions
+test_install_detects_agent_guide_links_with_trailing_whitespace
 test_install_refreshes_agent_guide_without_rewriting_existing_links
 test_install_warns_about_codex_override_without_writing_it
 test_install_remembers_agent_guide_opt_out_across_versions

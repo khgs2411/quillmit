@@ -173,16 +173,18 @@ Install writes a Quillmit-owned `QUILLMIT.md` next to each existing
 `@QUILLMIT.md` once. It refreshes the guide on every install, preserves the rest
 of your instructions, and reports which files it linked, refreshed, or skipped.
 It does not create instructions files for tools you do not use.
+Link detection ignores trailing whitespace, including CRLF line endings.
 
-`./install --no-agent-guide` removes the exact link lines and the guide files,
+`./install --no-agent-guide` removes those link lines and the guide files,
 leaving all other content, including separating blank lines, in place. The
 opt-out is stored in the install root. Later plain installs leave agent files
 alone; `./install --agent-guide` clears the opt-out and links the guide again.
 The two flags cannot be combined.
 
 Codex receives the link as plain text because it does not support imports.
-If a non-blank `AGENTS.override.md` exists, install warns that Codex ignores
-`AGENTS.md` and the guide. It never edits the override file.
+When linking or refreshing the Codex guide, install warns if a non-blank
+`AGENTS.override.md` exists, since Codex ignores `AGENTS.md` and the guide.
+It never edits the override file.
 
 ## Uninstall or return to an older release
 

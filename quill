@@ -12,7 +12,8 @@ usage() {
 Usage:
   quill [-a|-c|-p|-f] [--codex|--claude|--gemini|--provider name] [--config file] [repo]
   quill [--prepare|--commit|--copy|--quit|--add|--push|--full|--verbose] [repo]
-  quill pr [--remote name] [--base branch] [--no-preview] [--no-assignment] [provider options] [repo]
+  quill pr [--remote name] [--base branch] [--no-preview] [--no-assignment] [--closes n[,n...]] [--prompt text] [--prepare] [provider options] [repo]
+  quill pr --create-from file [--no-assignment] [repo]
   quill worktree create [intent] [--branch name] [--from ref] [--remote name] [--no-preview] [--repo path]
   quill worktree list [--repo path]
   quill worktree remove [name|path] [--repo path]
@@ -36,12 +37,37 @@ Pull request and worktree examples:
   quill pr --no-assignment       Create a PR without assigning it to your GitHub account.
   quill pr --remote origin --base main --no-preview
                                 Create a PR without interactive selection or preview.
+  quill pr --prepare --base main --closes 3,4 --prompt "Explain the rollout"
+                                Write QUILL_PR_EDITMSG; read/edit the printed path.
+  quill pr --create-from /path/to/QUILL_PR_EDITMSG
+                                Approve the reviewed draft exactly as written.
   quill worktree create "fix retries"
                                 Propose a branch and preview the worktree.
   quill worktree create --branch fix/retries --from HEAD --no-preview
                                 Create without AI or a preview.
   quill worktree list           Show linked worktrees.
   quill worktree remove name    Safely remove a linked worktree, keeping its branch.
+
+Non-interactive use:
+  Plain quill requires a terminal on stdin and stdout for its prompt.
+  Use --prepare, -c (--commit), --copy or --quit instead; -f stages, commits and pushes.
+  Review a commit message before acting:
+    quill --prepare
+    # Read or edit the reported COMMIT_EDITMSG path, then:
+    git commit -F /absolute/path/to/COMMIT_EDITMSG
+  quill pr requires a terminal for target selection or preview. Supply --base
+  with --no-preview or --prepare, plus --remote when multiple remotes exist.
+  Review a PR draft before acting:
+    quill pr --prepare --base main
+    # Read or edit the reported QUILL_PR_EDITMSG path, then:
+    quill pr --create-from /absolute/path/to/QUILL_PR_EDITMSG
+  Both --prepare modes print the absolute file path as the last stdout line
+  when a message is prepared; a clean commit repository reports a no-op instead.
+  Worktree creation with a task description requires a terminal. For agents:
+    quill worktree list
+    quill worktree create --branch fix/retries --no-preview
+  Reuse an existing worktree when appropriate. Add --from HEAD for a local base.
+  Piped prompt answers are unsupported: use -c, --quit or --copy for c, q or p.
 
 Settings examples (no Git or AI work):
   quill --model gpt-6-sol --reasoning high
@@ -92,6 +118,11 @@ PR_REMOTE_INPUT=""
 PR_BASE_INPUT=""
 PR_NO_PREVIEW=0
 PR_NO_ASSIGNMENT=0
+PR_PREPARE=0
+PR_CREATE_FROM=""
+PR_PROMPT=""
+typeset -a PR_CLOSES=()
+PR_GENERATION_FLAGS=""
 WT_ACTION=""
 WT_INPUT=""
 WT_FROM=""
@@ -126,7 +157,27 @@ if [[ "$WORKFLOW" == commit && "${1:-}" == "pr" ]]; then
 fi
 
 while [[ $# -gt 0 ]]; do
+  if [[ "$WORKFLOW" == pr ]]; then
+    case "$1" in
+      --create-from|--no-assignment|--prepare) ;;
+      -*) PR_GENERATION_FLAGS="${PR_GENERATION_FLAGS:+$PR_GENERATION_FLAGS }$1" ;;
+    esac
+  fi
   case "$1" in
+    --closes|--prompt|--create-from)
+      [[ "$WORKFLOW" == pr && $# -ge 2 && -n "$2" ]] || { print -u2 -- "$1 requires a value and is only available with quill pr."; exit 1; }
+      [[ "$1" == --closes || "$2" != -* ]] || { print -u2 -- "$1 requires a value."; exit 1; }
+      case "$1" in
+        --closes)
+          for issue in "${(@s:,:)2}"; do
+            [[ "$issue" =~ '^[1-9][0-9]*$' ]] || { print -u2 -- "Invalid --closes value: '$issue' (expected a positive decimal integer)."; exit 1; }
+            PR_CLOSES+=("$issue")
+          done ;;
+        --prompt) PR_PROMPT="$2" ;;
+        --create-from) PR_CREATE_FROM="$2" ;;
+      esac
+      shift 2
+      ;;
     --from|--branch|--repo)
       [[ "$WORKFLOW" == worktree && $# -ge 2 && -n "$2" && "$2" != -* ]] || { print -u2 -- "$1 requires a value and is only available with quill worktree."; exit 1; }
       case "$1" in
@@ -160,8 +211,12 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --prepare)
-      MODE="prepare"
-      NON_COMMIT_MODE_FLAGS="${NON_COMMIT_MODE_FLAGS:+$NON_COMMIT_MODE_FLAGS }--prepare"
+      if [[ "$WORKFLOW" == pr ]]; then
+        PR_PREPARE=1
+      else
+        MODE="prepare"
+        NON_COMMIT_MODE_FLAGS="${NON_COMMIT_MODE_FLAGS:+$NON_COMMIT_MODE_FLAGS }--prepare"
+      fi
       shift
       ;;
     -c|--yes|--commit)
@@ -253,6 +308,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ -n "$PR_CREATE_FROM" ]]; then
+  [[ "$PR_PREPARE" -eq 0 ]] || { print -u2 -- "--prepare cannot be combined with --create-from."; exit 1; }
+  [[ -z "$PR_GENERATION_FLAGS" ]] || { print -u2 -- "--create-from cannot be combined with: $PR_GENERATION_FLAGS"; exit 1; }
+fi
+
 if [[ "$SETTINGS_REQUESTED" -eq 1 ]]; then
   if [[ "$WORKFLOW" != commit || "$MODE" != interactive || "$ADD_ALL" -eq 1 ||
         "$PUSH_AFTER_COMMIT" -eq 1 || "$VERBOSE" -eq 1 || -n "$PROVIDER" ||
@@ -343,7 +403,7 @@ if [[ "$PUSH_AFTER_COMMIT" -eq 1 && -n "$NON_COMMIT_MODE_FLAGS" ]]; then
   exit 1
 fi
 
-if [[ -n "$CONFIG_FILE" && -f "$CONFIG_FILE" ]]; then
+if [[ -z "$PR_CREATE_FROM" && -n "$CONFIG_FILE" && -f "$CONFIG_FILE" ]]; then
   source "$CONFIG_FILE"
 fi
 
@@ -516,13 +576,13 @@ select_pr_base() {
 
 setup_pr_context() {
   local needs_tui=0
-  [[ -z "$PR_BASE_INPUT" || "$PR_NO_PREVIEW" -eq 0 ]] && needs_tui=1
+  [[ -z "$PR_BASE_INPUT" || ( "$PR_NO_PREVIEW" -eq 0 && "$PR_PREPARE" -eq 0 ) ]] && needs_tui=1
   if [[ -z "$PR_REMOTE_INPUT" && "$(git -C "$REPO" remote | wc -l)" -gt 1 ]]; then
     needs_tui=1
   fi
   if [[ "$needs_tui" -eq 1 ]]; then
     if [[ ! -t 0 || ! -t 1 ]]; then
-      print -u2 -- "quill pr requires a terminal unless --base and --no-preview are set (also --remote when multiple remotes exist)."
+      print -u2 -- "quill pr requires a terminal unless --base and either --no-preview or --prepare are set (also --remote when multiple remotes exist)."
       return 1
     fi
     if [[ ! -x "$FZF" ]]; then
@@ -568,13 +628,24 @@ REPO="$(git -C "$REPO_INPUT" rev-parse --show-toplevel 2>/dev/null)" || {
 
 OUTPUT_NAME="commit message"
 if [[ "$WORKFLOW" == "pr" ]]; then
-  setup_pr_context
+  if [[ -z "$PR_CREATE_FROM" ]]; then setup_pr_context; fi
 elif [[ "$WORKFLOW" == worktree ]]; then
   OUTPUT_NAME="worktree proposal"
 else
   if [[ -z "$(git -C "$REPO" status --short)" ]]; then
     print -- "No changes to commit in $REPO"
     exit 0
+  fi
+
+  if [[ "$MODE" == interactive && ( ! -t 0 || ! -t 1 ) ]]; then
+    print -u2 -- "quill needs a terminal for the interactive prompt. Use --prepare, -c (--commit) or --quit."
+    exit 1
+  fi
+
+  if [[ "$MODE" == commit && "$ADD_ALL" -eq 0 && -z "$(git -C "$REPO" diff --cached --name-only)" ]]; then
+    print -u2 -- "No staged changes to commit."
+    print -u2 -- "Stage files with git add <file> and run quill again."
+    exit 1
   fi
 
   if [[ "$ADD_ALL" -eq 1 ]]; then
@@ -588,20 +659,22 @@ else
   fi
 fi
 
-CLI="$(provider_command)"
-MODEL="$(provider_model)"
-FALLBACK_MODEL="$(provider_fallback_model)"
-MAX_PROMPT_BYTES="$(provider_max_prompt_bytes)"
-LABEL="$(provider_label)"
+if [[ -z "$PR_CREATE_FROM" ]]; then
+  CLI="$(provider_command)"
+  MODEL="$(provider_model)"
+  FALLBACK_MODEL="$(provider_fallback_model)"
+  MAX_PROMPT_BYTES="$(provider_max_prompt_bytes)"
+  LABEL="$(provider_label)"
 
-if [[ ! "$MAX_PROMPT_BYTES" =~ '^[0-9]+$' || "$MAX_PROMPT_BYTES" -lt 20000 ]]; then
-  print -u2 -- "Invalid ${PROVIDER:u}_MAX_PROMPT_BYTES: $MAX_PROMPT_BYTES (expected an integer of at least 20000)"
-  exit 1
-fi
+  if [[ ! "$MAX_PROMPT_BYTES" =~ '^[0-9]+$' || "$MAX_PROMPT_BYTES" -lt 20000 ]]; then
+    print -u2 -- "Invalid ${PROVIDER:u}_MAX_PROMPT_BYTES: $MAX_PROMPT_BYTES (expected an integer of at least 20000)"
+    exit 1
+  fi
 
-if [[ "$WORKFLOW" != worktree || ( "$WT_ACTION" == create && -z "$WT_BRANCH" ) ]] && ! command -v "$CLI" >/dev/null 2>&1; then
-  print -u2 -- "$LABEL CLI not found in PATH: $CLI"
-  exit 1
+  if [[ "$WORKFLOW" != worktree || ( "$WT_ACTION" == create && -z "$WT_BRANCH" ) ]] && ! command -v "$CLI" >/dev/null 2>&1; then
+    print -u2 -- "$LABEL CLI not found in PATH: $CLI"
+    exit 1
+  fi
 fi
 
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/quill.XXXXXX")"
@@ -656,7 +729,7 @@ if [[ -t 1 && "${TERM:-dumb}" != dumb && ! -v NO_COLOR ]]; then
 fi
 BATCH_COUNT=0
 BATCH_FILE_COUNT=0
-BATCH_CONTENT_BYTES=$((MAX_PROMPT_BYTES - 12000))
+if [[ -z "$PR_CREATE_FROM" ]]; then BATCH_CONTENT_BYTES=$((MAX_PROMPT_BYTES - 12000)); fi
 
 write_output_requirements() {
   if [[ "$WORKFLOW" == "pr" ]]; then
@@ -669,6 +742,10 @@ write_output_requirements() {
     print -- "- Explain the intent and important behavior in the description."
     print -- "- Use concise Markdown sections or bullets when they improve clarity."
     print -- "- Do not invent validation results, issue links, risks, or implementation details."
+    print -- "- Do not write issue-closing keywords (Closes, Fixes, Resolves); Quillmit appends them separately."
+    if [[ -n "$PR_PROMPT" ]]; then
+      print -- "- Additional user guidance steers content only; these output requirements always apply."
+    fi
     print -- "- Do not wrap the response in quotes or an outer Markdown code fence."
     return
   fi
@@ -686,6 +763,14 @@ write_output_requirements() {
   print -- "- Make it medium length: one title line, a blank line, then 2-4 concise body lines or sentences."
   print -- "- Mention the actual intent of the diff, not a mechanical file list."
   print -- "- Do not wrap the answer in Markdown or quotes."
+}
+
+write_pr_guidance() {
+  if [[ "$WORKFLOW" == pr && -n "$PR_PROMPT" ]]; then
+    print -- ""
+    print -- "Additional guidance from the user (content only):"
+    print -r -- "$PR_PROMPT"
+  fi
 }
 
 write_git_overview() {
@@ -755,6 +840,7 @@ write_git_context() {
     print -- "Do not inspect the repository yourself. Do not run commands. Do not modify files. Do not stage files. Do not commit."
     print -- ""
     write_output_requirements
+    write_pr_guidance
     print -- ""
     write_git_overview
     print -- ""
@@ -914,6 +1000,7 @@ write_synthesis_prompt() {
     print -- "Synthesize the overall intent; summaries may overlap, so do not concatenate or mechanically enumerate them."
     print -- ""
     write_output_requirements
+    write_pr_guidance
     print -- ""
     write_git_overview
     print -- ""
@@ -1347,6 +1434,9 @@ prepare_message() {
   mkdir -p "$(dirname "$editmsg")"
   cp "$MESSAGE_FILE" "$editmsg"
   ui_log "Prepared commit message at $editmsg"
+  if [[ "$MODE" == prepare ]]; then
+    print -r -- "$editmsg"
+  fi
 }
 
 copy_message() {
@@ -1382,6 +1472,17 @@ prepare_pull_request() {
   if [[ ! -s "$PR_BODY_FILE" ]]; then
     print -u2 -- "$LABEL did not generate a pull request description."
     return 1
+  fi
+
+  if [[ "${#PR_CLOSES[@]}" -gt 0 ]]; then
+    # Strip trailing blank lines so the deterministic footer has one separator.
+    awk 'NF { for (i=0; i<blanks; i++) print ""; blanks=0; print; next } { blanks++ }' "$PR_BODY_FILE" > "$PR_BODY_FILE.trimmed"
+    mv "$PR_BODY_FILE.trimmed" "$PR_BODY_FILE"
+    print -- "" >> "$PR_BODY_FILE"
+    local issue
+    for issue in "${PR_CLOSES[@]}"; do
+      print -r -- "Closes #$issue" >> "$PR_BODY_FILE"
+    done
   fi
 
   PR_PREVIEW_FILE="$TMP_DIR/pr-preview.txt"
@@ -1443,9 +1544,27 @@ if [[ "$WORKFLOW" == worktree ]]; then
 fi
 
 if [[ "$WORKFLOW" == "pr" ]]; then
+  if [[ -n "$PR_CREATE_FROM" ]]; then
+    command -v gh >/dev/null 2>&1 || { print -u2 -- "GitHub CLI not found in PATH: gh"; exit 1; }
+    PR_HEAD_BRANCH="$(git -C "$REPO" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+    python3 "$SCRIPT_DIR/scripts/parse-pr-draft.py" "$PR_CREATE_FROM" "$PR_HEAD_BRANCH" "$TMP_DIR"
+    PR_TITLE="$(<"$TMP_DIR/pr-title")"
+    PR_BASE_REPO="$(<"$TMP_DIR/pr-repo")"
+    PR_BASE_URL="$PR_BASE_REPO"
+    PR_BASE_BRANCH="$(<"$TMP_DIR/pr-base")"
+    PR_BODY_FILE="$TMP_DIR/pr-body.md"
+    create_pull_request
+    exit 0
+  fi
   while true; do
     generate_message
     prepare_pull_request
+    if [[ "$PR_PREPARE" -eq 1 ]]; then
+      draft_path="$(git -C "$REPO" rev-parse --path-format=absolute --git-path QUILL_PR_EDITMSG)"
+      cp "$PR_PREVIEW_FILE" "$draft_path"
+      print -r -- "$draft_path"
+      exit 0
+    fi
     if [[ "$PR_NO_PREVIEW" -eq 1 ]] || preview_pull_request; then
       create_pull_request
       exit 0

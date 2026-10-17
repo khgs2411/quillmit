@@ -45,7 +45,7 @@ pass `--no-preview`.
 - Supports Codex, Claude Code, and Gemini CLI.
 - Supports a fallback model for each provider when the primary model reaches a usage limit.
 - Reads staged changes first; if nothing is staged, reads the working tree.
-- Stages all changes immediately when `--add` or `--full` is passed.
+- Stages all changes before generation when `--add` or `--full` is passed, after validation.
 - Commits only staged changes.
 - Provides `-a`, `-c`, `-p`, and `-f` aliases for common commit workflows.
 - Creates AI-written pull requests with searchable branch selection and approval previews.
@@ -325,6 +325,116 @@ branch when necessary. Pass `quill pr --no-assignment` to skip assignment and as
 it yourself on GitHub later. Uncommitted changes are
 not included. Provider and configuration flags remain available, for example
 `quill pr --claude` or `quill pr --config /path/to/quill.config`.
+
+### Agent PR review
+
+Prepare a draft, read and optionally edit it with ordinary file tools, then approve
+it with `--create-from`:
+
+```sh
+quill pr --prepare --base main --closes 3,4 --prompt "Explain the rollout"
+# Read/edit the absolute path printed by prepare, for example:
+quill pr --create-from /path/to/.git/QUILL_PR_EDITMSG
+```
+
+`--prepare` writes the same content as the preview to `QUILL_PR_EDITMSG` in Git's
+metadata directory, prints its absolute path, and exits without creating a PR.
+Each run overwrites the previous draft; linked worktrees get their own draft.
+Provide `--base` and, with multiple remotes, `--remote` to run without a terminal
+or fzf. `--prepare --no-preview` is also accepted. To decline, simply stop.
+Commit-side `quill --prepare` continues to prepare `COMMIT_EDITMSG`.
+
+The draft contains its entire target and reviewed content:
+
+```text
+From: feature
+Into: owner/repo:main
+
+Title
+
+Markdown body
+```
+
+`--create-from <file>` uses the title and body exactly as written, without a
+provider call, preview, remote selection, or fetch. It refuses a different current
+branch (including detached HEAD), malformed target, missing title, or empty body.
+It accepts `--no-assignment` and a repository path; target, generation, provider,
+and preview flags cannot be combined with it. It does not push the branch itself;
+GitHub CLI handles an unpushed head as in the existing creation flow.
+
+`--closes 3,4` appends a separate `Closes #3` and `Closes #4` line at the end of
+the generated body. GitHub needs one closing keyword per issue: `Closes #3, #4`
+does not close both, and ranges are unsupported. Only positive decimal numbers
+are accepted; `0`, leading zeros such as `03`, empty items, `#3`, signs, ranges,
+and words are rejected before
+generation. Order and duplicates are preserved. Issue numbers are not looked up
+on GitHub. Closing keywords take effect only when a PR targets the default branch.
+
+`--prompt "text"` supplies content guidance after Quillmit's output requirements,
+including in the final synthesis of large changes. It cannot override the title
+and body format. The provider is instructed not to write closing keywords;
+deterministic closing lines come from `--closes`. Both flags also work with the
+interactive preview and `--no-preview`, and closing lines survive regeneration
+when another base branch is selected. They are rejected with `--create-from`,
+which publishes the reviewed file without further generation or additions.
+
+### Non-interactive use
+
+The interactive commit prompt requires both stdin and stdout to be terminals.
+Plain `quill` and `quill -a` refuse without them before staging or calling a
+provider. A clean repository still prints "No changes to commit" and exits
+successfully. Piping answers into the prompt is unsupported: replace `c` with
+`-c`, `q` with `--quit`, and `p` with `--copy`. Editing and regeneration require
+a person at a terminal.
+
+To review a commit message before committing:
+
+```sh
+quill --prepare
+# Read or edit the COMMIT_EDITMSG path printed on the last stdout line, then:
+git commit -F /absolute/path/to/COMMIT_EDITMSG
+```
+
+`--prepare` keeps its human-readable "Prepared commit message at …" line and
+prints the bare absolute path after it. Both `quill --prepare` and
+`quill pr --prepare` report their prepared file as the last stdout line. Linked
+worktrees use their own Git metadata file. When the commit repository is clean,
+there is no prepared message or path; the successful no-op is reported instead.
+Preparation leaves the index as it was unless you also pass `-a`.
+
+For PRs, target selection and preview need a terminal. Provide `--base` and either
+`--prepare` or `--no-preview`, plus `--remote` when there are several remotes:
+
+```sh
+quill pr --prepare --base main --remote origin
+# Read or edit the QUILL_PR_EDITMSG path printed on the last stdout line, then:
+quill pr --create-from /absolute/path/to/QUILL_PR_EDITMSG
+```
+
+Use `--no-preview` to create the generated PR immediately. Use the prepare and
+`--create-from` loop above when review is needed.
+
+Worktree creation from a task description needs a terminal. Agents should first
+list existing worktrees and reuse a suitable one. When a new worktree is needed,
+choose the branch name and skip preview:
+
+```sh
+quill worktree list
+quill worktree create --branch fix/retries --no-preview
+# For a local starting point without fetching:
+quill worktree create --branch fix/local-retries --from HEAD --no-preview
+```
+
+Review the listed worktrees, branch name, and starting point before creation.
+The default starting point is the remote's default branch.
+
+Commit flags `-c` (also `--commit` and `--yes`), `-f`, `--prepare`, `--copy`, and
+`--quit` work without a terminal. `-c` with nothing staged refuses before calling
+the provider and prints a `git add` hint; use `-a -c` to stage all changes first.
+`-f` stages, commits, and pushes immediately. Clipboard modes still require a
+working clipboard command.
+
+### Other commit modes
 
 To generate, preview, copy the message, and exit without committing:
 

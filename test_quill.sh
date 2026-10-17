@@ -216,7 +216,7 @@ test_clean_repo_reports_no_changes() {
   git init -q "$repo"
 
   local output
-  output="$(PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --quit "$repo")"
+  output="$(PATH="$(make_fake_bin):$PATH" "$ROOT/quill" "$repo" </dev/null)"
 
   assert_contains "$output" "No changes to commit"
 }
@@ -244,18 +244,34 @@ test_codex_is_default_and_receives_git_context() {
   [[ -n "$(git -C "$repo" status --short)" ]] || fail "expected repo to remain dirty"
 }
 
-test_default_prepares_and_prompts_for_action() {
-  local repo="$TMP_ROOT/prepare"
-  make_dirty_repo "$repo"
+test_interactive_commit_refuses_without_terminal_before_side_effects() {
+  local mode repo output_file error_file prompt_capture before_index
+  for mode in plain add; do
+    repo="$TMP_ROOT/headless-$mode"
+    make_dirty_repo "$repo"
+    git -C "$repo" add file.txt
+    print -r -- "leave unstaged" > "$repo/other.txt"
+    before_index="$(git -C "$repo" diff --cached)"
+    output_file="$repo-stdout"
+    error_file="$repo-stderr"
+    prompt_capture="$repo-prompt"
+    local -a flags=()
+    [[ "$mode" != add ]] || flags=(-a)
 
-  local output
-  output="$(print q | PATH="$(make_fake_bin):$PATH" "$ROOT/quill" "$repo")"
+    if QUILL_STDIN_CAPTURE="$prompt_capture" PATH="$(make_fake_bin):$PATH" \
+      "$ROOT/quill" "${flags[@]}" "$repo" </dev/null >"$output_file" 2>"$error_file"; then
+      fail "expected interactive $mode mode to refuse without a terminal"
+    fi
 
-  assert_contains "$output" "Prepared commit message"
-  assert_contains "$output" "[c]ommit, [e]dit, co[p]y, [r]egenerate, [q]uit"
-  assert_contains "$output" "Quit without committing"
-  assert_contains "$(<"$(commit_editmsg_path "$repo")")" "Add terminal commit message helper"
-  [[ -n "$(git -C "$repo" status --short)" ]] || fail "expected repo to remain dirty after prepare"
+    assert_contains "$(<"$error_file")" "terminal"
+    assert_contains "$(<"$error_file")" "--prepare"
+    assert_contains "$(<"$error_file")" "-c"
+    assert_contains "$(<"$error_file")" "--quit"
+    assert_equals "$(<"$output_file")" ""
+    [[ ! -e "$prompt_capture" ]] || fail "refused $mode mode called provider"
+    [[ ! -e "$(commit_editmsg_path "$repo")" ]] || fail "refused $mode mode prepared message"
+    assert_equals "$(git -C "$repo" diff --cached)" "$before_index"
+  done
 }
 
 test_prepare_mode_prepares_and_exits() {
@@ -263,12 +279,41 @@ test_prepare_mode_prepares_and_exits() {
   make_dirty_repo "$repo"
 
   local output
-  output="$(PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --prepare "$repo")"
+  output="$(PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --prepare "$repo" </dev/null)"
 
   assert_contains "$output" "Prepared commit message"
+  assert_equals "${output##*$'\n'}" "$(commit_editmsg_path "$repo")"
   assert_not_contains "$output" "[c]ommit, [e]dit, co[p]y, [r]egenerate, [q]uit"
   assert_contains "$(<"$(commit_editmsg_path "$repo")")" "Add terminal commit message helper"
   [[ -n "$(git -C "$repo" status --short)" ]] || fail "expected repo to remain dirty after prepare"
+}
+
+test_prepare_uses_linked_worktree_commit_message_path() {
+  local repo="$TMP_ROOT/prepare-main" linked="$TMP_ROOT/prepare-linked" output
+  make_dirty_repo "$repo"
+  git -C "$repo" config user.email test@example.com
+  git -C "$repo" config user.name 'Test User'
+  git -C "$repo" add file.txt
+  git -C "$repo" commit -qm Initial
+  git -C "$repo" worktree add -qb linked "$linked"
+  print -r -- 'linked change' > "$linked/file.txt"
+  local original_message="$(<"$(commit_editmsg_path "$repo")")"
+
+  output="$(PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --prepare "$linked" </dev/null)"
+
+  assert_equals "${output##*$'\n'}" "$(commit_editmsg_path "$linked")"
+  assert_contains "$(<"$(commit_editmsg_path "$linked")")" 'Add terminal commit message helper'
+  assert_equals "$(<"$(commit_editmsg_path "$repo")")" "$original_message"
+}
+
+test_help_documents_non_interactive_workflows() {
+  local output="$("$ROOT/quill" --help)"
+  assert_contains "$output" 'Non-interactive use:'
+  assert_contains "$output" 'terminal'
+  assert_contains "$output" 'git commit -F'
+  assert_contains "$output" 'quill pr --create-from'
+  assert_contains "$output" 'quill worktree list'
+  assert_contains "$output" 'last stdout line'
 }
 
 test_quit_prints_without_preparing() {
@@ -480,8 +525,10 @@ test_commit_mode_fails_cleanly_without_staged_changes() {
   local repo="$TMP_ROOT/commit-no-staged"
   make_dirty_repo "$repo"
   local output_file="$TMP_ROOT/commit-no-staged-output.txt"
+  local prompt_capture="$TMP_ROOT/commit-no-staged-prompt.txt"
 
-  if PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --commit "$repo" > "$output_file" 2>&1; then
+  if QUILL_STDIN_CAPTURE="$prompt_capture" PATH="$(make_fake_bin):$PATH" \
+    "$ROOT/quill" -c "$repo" </dev/null > "$output_file" 2>&1; then
     fail "expected commit mode to fail when no changes are staged"
   fi
 
@@ -491,6 +538,7 @@ test_commit_mode_fails_cleanly_without_staged_changes() {
   assert_contains "$output" "Stage files with git add <file> and run quill again."
   assert_not_contains "$output" "Changes not staged for commit:"
   assert_not_contains "$output" "no changes added to commit"
+  [[ ! -e "$prompt_capture" ]] || fail "unstaged commit mode called provider"
   [[ -n "$(git -C "$repo" status --short)" ]] || fail "expected repo to remain dirty"
 }
 
@@ -702,17 +750,312 @@ test_pr_flow_uses_selected_base_and_generated_content() {
   assert_equals "$(git --git-dir "$remote" rev-parse refs/heads/feature)" "$(git -C "$repo" rev-parse HEAD)"
 }
 
+test_pr_prompt_without_guidance() {
+  local repo="$TMP_ROOT/pr-plain-prompt" capture="$TMP_ROOT/pr-plain-prompt.txt"
+  make_pr_repo "$repo" "$TMP_ROOT/pr-plain-prompt.git"
+  QUILL_STDIN_CAPTURE="$capture" PATH="$(make_fake_bin)" \
+    "$ROOT/quill" pr --base develop --no-preview "$repo" >/dev/null
+  assert_not_contains "$(<"$capture")" 'Additional user guidance steers content only'
+  assert_not_contains "$(<"$capture")" 'Additional guidance from the user'
+  assert_contains "$(<"$capture")" 'Do not write issue-closing keywords'
+}
+
+test_pr_closes_rejects_invalid_values() {
+  local repo="$TMP_ROOT/closes_rejects_invalid_values" output invalid
+  make_pr_repo "$repo" "$repo.git"
+  local -x PATH="$(make_fake_bin)"
+  local -x QUILL_STDIN_CAPTURE="$repo-prompt"
+  local -x GH_ARGS_CAPTURE="$repo-gh-args"
+  local -x GH_BODY_CAPTURE="$repo-gh-body"
+  local -x XDG_CACHE_HOME="$repo-cache"
+  for invalid in '4-11' '#3' three 0 03 '' ',3' '3,' '3,,4' -3 +3 '3,0'; do
+    if output="$("$ROOT/quill" pr --closes "$invalid" /missing/repo 2>&1)"; then
+      fail "expected --closes '$invalid' rejection"
+    fi
+    assert_contains "$output" '--closes'
+    if [[ "$invalid" != *,* ]]; then assert_contains "$output" "$invalid"; fi
+    [[ ! -e "$QUILL_STDIN_CAPTURE" ]] || fail 'invalid closes called provider'
+  done
+}
+
+test_pr_agent_flags_require_values() {
+  local repo="$TMP_ROOT/agent_flags_require_values" flag
+  make_pr_repo "$repo" "$repo.git"
+  local -x PATH="$(make_fake_bin)"
+  local -x QUILL_STDIN_CAPTURE="$repo-prompt"
+  local -x GH_ARGS_CAPTURE="$repo-gh-args"
+  local -x GH_BODY_CAPTURE="$repo-gh-body"
+  local -x XDG_CACHE_HOME="$repo-cache"
+  for flag in --closes --prompt --create-from; do
+    if "$ROOT/quill" pr "$flag" >/dev/null 2>&1; then fail "expected missing $flag rejection"; fi
+  done
+}
+
+test_pr_agent_flags_require_pr_workflow() {
+  local repo="$TMP_ROOT/agent_flags_require_pr_workflow" flag
+  make_pr_repo "$repo" "$repo.git"
+  local -x PATH="$(make_fake_bin)"
+  local -x QUILL_STDIN_CAPTURE="$repo-prompt"
+  local -x GH_ARGS_CAPTURE="$repo-gh-args"
+  local -x GH_BODY_CAPTURE="$repo-gh-body"
+  local -x XDG_CACHE_HOME="$repo-cache"
+  for flag in --closes --prompt --create-from; do
+    if "$ROOT/quill" "$flag" 3 "$repo" >/dev/null 2>&1; then fail "expected PR-only $flag rejection"; fi
+  done
+}
+
+test_pr_prepare_writes_draft_with_closing_lines() {
+  local repo="$TMP_ROOT/prepare_writes_draft_with_closing_lines" output
+  make_pr_repo "$repo" "$repo.git"
+  local draft="$(git -C "$repo" rev-parse --path-format=absolute --git-path QUILL_PR_EDITMSG)"
+  local expected="$repo-expected"
+  local -x PATH="$(make_fake_bin)"
+  local -x QUILL_STDIN_CAPTURE="$repo-prompt"
+  local -x GH_ARGS_CAPTURE="$repo-gh-args"
+  local -x GH_BODY_CAPTURE="$repo-gh-body"
+  local -x XDG_CACHE_HOME="$repo-cache"
+  output="$("$ROOT/quill" pr --prepare --base develop --closes 3,4,3 "$repo")"
+  draft="$(git -C "$repo" rev-parse --path-format=absolute --git-path QUILL_PR_EDITMSG)"
+  assert_equals "${output##*$'\n'}" "$draft"
+  [[ ! -e "$GH_ARGS_CAPTURE" ]] || fail 'prepare created PR'
+  cat > "$expected" <<'DRAFT'
+From: feature
+Into: test/repo:develop
+
+Add terminal commit message helper
+
+Reads the current Git state and drafts a focused commit message.
+Keeps the actual commit behind an explicit terminal action.
+
+Closes #3
+Closes #4
+Closes #3
+DRAFT
+  cmp "$draft" "$expected" || fail 'unexpected draft bytes'
+}
+
+test_pr_prompt_follows_output_requirements() {
+  local repo="$TMP_ROOT/prompt_follows_output_requirements"
+  make_pr_repo "$repo" "$repo.git"
+  local -x PATH="$(make_fake_bin)"
+  local -x QUILL_STDIN_CAPTURE="$repo-prompt"
+  local -x GH_ARGS_CAPTURE="$repo-gh-args"
+  local -x GH_BODY_CAPTURE="$repo-gh-body"
+  local -x XDG_CACHE_HOME="$repo-cache"
+  "$ROOT/quill" pr --prepare --base develop --prompt 'Explain the rollout; keep \n literal.' "$repo" >/dev/null
+  python3 - "$QUILL_STDIN_CAPTURE" <<'PROMPT'
+import sys
+from pathlib import Path
+prompt = Path(sys.argv[1]).read_text()
+assert prompt.index('Requirements:') < prompt.index('Additional guidance from the user')
+assert 'Explain the rollout; keep \\n literal.' in prompt
+assert 'Do not write issue-closing keywords' in prompt
+assert prompt.index('Additional user guidance steers content only') < prompt.index('Additional guidance from the user')
+PROMPT
+}
+
+test_pr_prepare_overwrites_previous_draft() {
+  local repo="$TMP_ROOT/prepare_overwrites_previous_draft"
+  make_pr_repo "$repo" "$repo.git"
+  local draft="$(git -C "$repo" rev-parse --path-format=absolute --git-path QUILL_PR_EDITMSG)"
+  local expected="$repo-expected"
+  local -x PATH="$(make_fake_bin)"
+  local -x QUILL_STDIN_CAPTURE="$repo-prompt"
+  local -x GH_ARGS_CAPTURE="$repo-gh-args"
+  local -x GH_BODY_CAPTURE="$repo-gh-body"
+  local -x XDG_CACHE_HOME="$repo-cache"
+  "$ROOT/quill" pr --prepare --base develop --closes 3,4,3 "$repo" >/dev/null
+  cp "$draft" "$expected"
+  print -- stale > "$draft"
+  "$ROOT/quill" pr --prepare --no-preview --base develop --closes 3,4,3 "$repo" >/dev/null
+  cmp "$draft" "$expected" || fail 'prepare did not overwrite draft'
+}
+
+test_pr_no_preview_appends_closing_lines() {
+  local repo="$TMP_ROOT/no_preview_appends_closing_lines"
+  make_pr_repo "$repo" "$repo.git"
+  local -x PATH="$(make_fake_bin)"
+  local -x QUILL_STDIN_CAPTURE="$repo-prompt"
+  local -x GH_ARGS_CAPTURE="$repo-gh-args"
+  local -x GH_BODY_CAPTURE="$repo-gh-body"
+  local -x XDG_CACHE_HOME="$repo-cache"
+  "$ROOT/quill" pr --base develop --no-preview --closes 3,4 --prompt 'Mention context' "$repo" >/dev/null
+  assert_equals "$(tail -3 "$GH_BODY_CAPTURE")" $'\nCloses #3\nCloses #4'
+  assert_contains "$(<"$QUILL_STDIN_CAPTURE")" 'Mention context'
+}
+
+test_pr_create_from_preserves_reviewed_content_without_provider() {
+  local repo="$TMP_ROOT/create_from_preserves_reviewed_content_without_provider"
+  make_pr_repo "$repo" "$repo.git"
+  local draft="$(git -C "$repo" rev-parse --path-format=absolute --git-path QUILL_PR_EDITMSG)"
+  local expected="$repo-expected"
+  local -x PATH="$(make_fake_bin)"
+  local -x QUILL_STDIN_CAPTURE="$repo-prompt"
+  local -x GH_ARGS_CAPTURE="$repo-gh-args"
+  local -x GH_BODY_CAPTURE="$repo-gh-body"
+  local -x XDG_CACHE_HOME="$repo-cache"
+  # The draft alone determines the target, even with no remotes or usable config.
+  git -C "$repo" remote remove origin
+  python3 - "$draft" "$expected" <<'EDIT'
+import sys
+from pathlib import Path
+body = b'  Reviewed body with `code` and \\slashes.\n\nTrailing blanks stay.\n\n\n'
+Path(sys.argv[1]).write_bytes(b'From: feature\nInto: another/project:release/v1\n\nReviewed title\n\n' + body)
+Path(sys.argv[2]).write_bytes(body)
+EDIT
+  local -x XDG_CONFIG_HOME="$TMP_ROOT/agent-config"
+  mkdir -p "$XDG_CONFIG_HOME/quillmit"
+  print -- 'exit 98' > "$XDG_CONFIG_HOME/quillmit/quill.config"
+  "$ROOT/quill" pr --create-from "$draft" --no-assignment "$repo" >/dev/null
+  cmp "$GH_BODY_CAPTURE" "$expected" || fail 'reviewed body bytes changed'
+  assert_contains "$(<"$GH_ARGS_CAPTURE")" '--repo another/project --base release/v1'
+  assert_contains "$(<"$GH_ARGS_CAPTURE")" '--title Reviewed title'
+  assert_not_contains "$(<"$GH_ARGS_CAPTURE")" '--assignee'
+  [[ ! -e "$QUILL_STDIN_CAPTURE" ]] || fail 'create-from called provider'
+}
+
+test_pr_create_from_respects_assignment() {
+  local repo="$TMP_ROOT/create_from_respects_assignment"
+  make_pr_repo "$repo" "$repo.git"
+  local draft="$(git -C "$repo" rev-parse --path-format=absolute --git-path QUILL_PR_EDITMSG)"
+  local -x PATH="$(make_fake_bin)"
+  local -x QUILL_STDIN_CAPTURE="$repo-prompt"
+  local -x GH_ARGS_CAPTURE="$repo-gh-args"
+  local -x GH_BODY_CAPTURE="$repo-gh-body"
+  local -x XDG_CACHE_HOME="$repo-cache"
+  printf 'From: feature\nInto: test/repo:develop\n\nReviewed title\n\nReviewed body\n' > "$draft"
+  "$ROOT/quill" pr --create-from "$draft" --no-assignment "$repo" >/dev/null
+  assert_not_contains "$(<"$GH_ARGS_CAPTURE")" '--assignee'
+  "$ROOT/quill" pr --create-from "$draft" "$repo" >/dev/null
+  assert_contains "$(<"$GH_ARGS_CAPTURE")" '--assignee @me'
+}
+
+test_pr_create_from_rejects_conflicting_flags() {
+  local repo="$TMP_ROOT/create_from_rejects_conflicting_flags" output flag
+  make_pr_repo "$repo" "$repo.git"
+  local draft="$(git -C "$repo" rev-parse --path-format=absolute --git-path QUILL_PR_EDITMSG)"
+  local -x PATH="$(make_fake_bin)"
+  local -x QUILL_STDIN_CAPTURE="$repo-prompt"
+  local -x GH_ARGS_CAPTURE="$repo-gh-args"
+  local -x GH_BODY_CAPTURE="$repo-gh-body"
+  local -x XDG_CACHE_HOME="$repo-cache"
+  printf 'From: feature\nInto: test/repo:develop\n\nReviewed title\n\nReviewed body\n' > "$draft"
+  for flag in --base --remote --closes --prompt --provider --config --model --reasoning --fast; do
+    if output="$("$ROOT/quill" pr --create-from "$draft" "$flag" 3 "$repo" 2>&1)"; then fail "accepted create-from $flag"; fi
+    assert_contains "$output" '--create-from'
+  done
+  for flag in --prepare --no-preview --codex --claude --gemini --verbose --which --unknown; do
+    if output="$("$ROOT/quill" pr "$flag" --create-from "$draft" "$repo" 2>&1)"; then fail "accepted create-from $flag"; fi
+    assert_contains "$output" '--create-from'
+  done
+  [[ ! -e "$GH_ARGS_CAPTURE" && ! -e "$QUILL_STDIN_CAPTURE" ]] || fail 'refusal called gh or provider'
+}
+
+test_pr_create_from_rejects_branch_mismatch() {
+  local repo="$TMP_ROOT/create_from_rejects_branch_mismatch" output
+  make_pr_repo "$repo" "$repo.git"
+  local draft="$(git -C "$repo" rev-parse --path-format=absolute --git-path QUILL_PR_EDITMSG)"
+  local -x PATH="$(make_fake_bin)"
+  local -x QUILL_STDIN_CAPTURE="$repo-prompt"
+  local -x GH_ARGS_CAPTURE="$repo-gh-args"
+  local -x GH_BODY_CAPTURE="$repo-gh-body"
+  local -x XDG_CACHE_HOME="$repo-cache"
+  printf 'From: feature\nInto: test/repo:develop\n\nReviewed title\n\nReviewed body\n' > "$draft"
+  git -C "$repo" switch -q main
+  if output="$("$ROOT/quill" pr --create-from "$draft" "$repo" 2>&1)"; then fail 'accepted branch mismatch'; fi
+  assert_contains "$output" "From branch check failed: draft is for 'feature', current branch is 'main'."
+  [[ ! -e "$GH_ARGS_CAPTURE" && ! -e "$QUILL_STDIN_CAPTURE" ]] || fail 'refusal called gh or provider'
+}
+
+test_pr_create_from_rejects_detached_head() {
+  local repo="$TMP_ROOT/create_from_rejects_detached_head" output
+  make_pr_repo "$repo" "$repo.git"
+  local draft="$(git -C "$repo" rev-parse --path-format=absolute --git-path QUILL_PR_EDITMSG)"
+  local -x PATH="$(make_fake_bin)"
+  local -x QUILL_STDIN_CAPTURE="$repo-prompt"
+  local -x GH_ARGS_CAPTURE="$repo-gh-args"
+  local -x GH_BODY_CAPTURE="$repo-gh-body"
+  local -x XDG_CACHE_HOME="$repo-cache"
+  printf 'From: feature\nInto: test/repo:develop\n\nReviewed title\n\nReviewed body\n' > "$draft"
+  git -C "$repo" checkout -q --detach
+  if output="$("$ROOT/quill" pr --create-from "$draft" "$repo" 2>&1)"; then fail 'accepted detached HEAD'; fi
+  assert_contains "$output" 'From branch'
+  [[ ! -e "$GH_ARGS_CAPTURE" && ! -e "$QUILL_STDIN_CAPTURE" ]] || fail 'refusal called gh or provider'
+}
+
+test_pr_create_from_rejects_invalid_target() {
+  local repo="$TMP_ROOT/create_from_rejects_invalid_target" output
+  make_pr_repo "$repo" "$repo.git"
+  local draft="$(git -C "$repo" rev-parse --path-format=absolute --git-path QUILL_PR_EDITMSG)"
+  local -x PATH="$(make_fake_bin)"
+  local -x QUILL_STDIN_CAPTURE="$repo-prompt"
+  local -x GH_ARGS_CAPTURE="$repo-gh-args"
+  local -x GH_BODY_CAPTURE="$repo-gh-body"
+  local -x XDG_CACHE_HOME="$repo-cache"
+  printf 'From: feature\nInto: broken\n\nTitle\n\nBody\n' > "$draft"
+  if output="$("$ROOT/quill" pr --create-from "$draft" "$repo" 2>&1)"; then fail 'accepted invalid target'; fi
+  assert_contains "$output" 'target'
+  [[ ! -e "$GH_ARGS_CAPTURE" && ! -e "$QUILL_STDIN_CAPTURE" ]] || fail 'refusal called gh or provider'
+}
+
+test_pr_create_from_rejects_invalid_title() {
+  local repo="$TMP_ROOT/create_from_rejects_invalid_title" output
+  make_pr_repo "$repo" "$repo.git"
+  local draft="$(git -C "$repo" rev-parse --path-format=absolute --git-path QUILL_PR_EDITMSG)"
+  local -x PATH="$(make_fake_bin)"
+  local -x QUILL_STDIN_CAPTURE="$repo-prompt"
+  local -x GH_ARGS_CAPTURE="$repo-gh-args"
+  local -x GH_BODY_CAPTURE="$repo-gh-body"
+  local -x XDG_CACHE_HOME="$repo-cache"
+  printf 'From: feature\nInto: test/repo:main\n\n' > "$draft"
+  if output="$("$ROOT/quill" pr --create-from "$draft" "$repo" 2>&1)"; then fail 'accepted invalid title'; fi
+  assert_contains "$output" 'title'
+  [[ ! -e "$GH_ARGS_CAPTURE" && ! -e "$QUILL_STDIN_CAPTURE" ]] || fail 'refusal called gh or provider'
+}
+
+test_pr_create_from_rejects_invalid_body() {
+  local repo="$TMP_ROOT/create_from_rejects_invalid_body" output
+  make_pr_repo "$repo" "$repo.git"
+  local draft="$(git -C "$repo" rev-parse --path-format=absolute --git-path QUILL_PR_EDITMSG)"
+  local -x PATH="$(make_fake_bin)"
+  local -x QUILL_STDIN_CAPTURE="$repo-prompt"
+  local -x GH_ARGS_CAPTURE="$repo-gh-args"
+  local -x GH_BODY_CAPTURE="$repo-gh-body"
+  local -x XDG_CACHE_HOME="$repo-cache"
+  printf 'From: feature\nInto: test/repo:main\n\nTitle\n\n  \n' > "$draft"
+  if output="$("$ROOT/quill" pr --create-from "$draft" "$repo" 2>&1)"; then fail 'accepted invalid body'; fi
+  assert_contains "$output" 'body'
+  [[ ! -e "$GH_ARGS_CAPTURE" && ! -e "$QUILL_STDIN_CAPTURE" ]] || fail 'refusal called gh or provider'
+}
+
+test_pr_create_from_rejects_invalid_separator() {
+  local repo="$TMP_ROOT/create_from_rejects_invalid_separator" output
+  make_pr_repo "$repo" "$repo.git"
+  local draft="$(git -C "$repo" rev-parse --path-format=absolute --git-path QUILL_PR_EDITMSG)"
+  local -x PATH="$(make_fake_bin)"
+  local -x QUILL_STDIN_CAPTURE="$repo-prompt"
+  local -x GH_ARGS_CAPTURE="$repo-gh-args"
+  local -x GH_BODY_CAPTURE="$repo-gh-body"
+  local -x XDG_CACHE_HOME="$repo-cache"
+  printf 'From: feature\nInto: test/repo:main\nTitle\n\nBody\n' > "$draft"
+  if output="$("$ROOT/quill" pr --create-from "$draft" "$repo" 2>&1)"; then fail 'accepted invalid separator'; fi
+  assert_contains "$output" 'separator'
+  [[ ! -e "$GH_ARGS_CAPTURE" && ! -e "$QUILL_STDIN_CAPTURE" ]] || fail 'refusal called gh or provider'
+}
+
 test_pr_rejects_commit_workflow_flags() {
   local repo="$TMP_ROOT/pr-invalid"
   git init -q "$repo"
   local output_file="$TMP_ROOT/pr-invalid-output.txt"
 
-  if PATH="$(make_fake_bin):$PATH" "$ROOT/quill" pr -c "$repo" > "$output_file" 2>&1; then
-    fail "expected quill pr to reject commit workflow flags"
-  fi
-
-  assert_contains "$(<"$output_file")" "Commit workflow flags cannot be combined with quill pr."
-  assert_not_contains "$(<"$output_file")" "Generating"
+  local flag
+  for flag in -c --commit --copy --quit --add --push --full; do
+    if PATH="$(make_fake_bin):$PATH" "$ROOT/quill" pr "$flag" "$repo" > "$output_file" 2>&1; then
+      fail "expected quill pr to reject $flag"
+    fi
+    assert_contains "$(<"$output_file")" "Commit workflow flags cannot be combined with quill pr."
+    assert_not_contains "$(<"$output_file")" "Generating"
+  done
 }
 
 test_push_does_not_run_when_commit_has_no_staged_changes() {
@@ -751,31 +1094,6 @@ test_push_failure_leaves_local_commit() {
   assert_contains "$output" "Push failed. Commit remains local."
   assert_equals "$(git -C "$repo" log -1 --pretty=%s)" "Add terminal commit message helper"
   [[ -z "$(git -C "$repo" status --short)" ]] || fail "expected local commit to remain clean"
-}
-
-test_interactive_push_pushes_only_after_commit_choice() {
-  local repo="$TMP_ROOT/interactive-push"
-  local remote="$TMP_ROOT/interactive-push.git"
-  make_dirty_repo_with_remote "$repo" "$remote"
-  git -C "$repo" add file.txt
-
-  print c | PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --push "$repo" >/dev/null
-
-  assert_equals "$(git --git-dir "$remote" log -1 --pretty=%s)" "Add terminal commit message helper"
-}
-
-test_interactive_push_does_not_push_after_quit_choice() {
-  local repo="$TMP_ROOT/interactive-push-quit"
-  local remote="$TMP_ROOT/interactive-push-quit.git"
-  make_dirty_repo_with_remote "$repo" "$remote"
-  git -C "$repo" add file.txt
-
-  print q | PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --push "$repo" >/dev/null
-
-  if git --git-dir "$remote" rev-parse --verify HEAD >/dev/null 2>&1; then
-    fail "expected remote to remain without commits after quit"
-  fi
-  [[ -n "$(git -C "$repo" status --short)" ]] || fail "expected repo to remain dirty after quit"
 }
 
 test_push_rejects_non_commit_modes_before_generation() {
@@ -838,7 +1156,7 @@ make_install_source() {
   local source="$1"
   mkdir -p "$source/scripts" "$source/third-party" "$source/fake-bin" "$source/archive"
   cp "$ROOT/quill" "$ROOT/quill.config" "$ROOT/VERSION" "$ROOT/install" "$source/"
-  cp "$ROOT/scripts/setup-deps" "$ROOT/scripts/worktree" "$ROOT/scripts/filter-diff.py" "$ROOT/scripts/run-provider.py" "$source/scripts/"
+  cp "$ROOT/scripts/setup-deps" "$ROOT/scripts/worktree" "$ROOT/scripts/filter-diff.py" "$ROOT/scripts/run-provider.py" "$ROOT/scripts/parse-pr-draft.py" "$source/scripts/"
   cp "$ROOT/third-party/fzf.LICENSE" "$source/third-party/"
   print -rl -- '#!/bin/sh' 'echo fixture-fzf' > "$source/archive/fzf"
   chmod +x "$source/archive/fzf"
@@ -923,6 +1241,7 @@ test_install_copies_versioned_quill_package() {
   cmp -s "$ROOT/quill" "$version_dir/quill" || fail "installed quill differs from release source"
   cmp -s "$ROOT/quill.config" "$version_dir/quill.config" || fail "installed config differs from release source"
   cmp -s "$ROOT/VERSION" "$version_dir/VERSION" || fail "installed version differs from release source"
+  cmp -s "$ROOT/scripts/parse-pr-draft.py" "$version_dir/scripts/parse-pr-draft.py" || fail "installed draft parser differs from release source"
   local installed_repo="$TMP_ROOT/installed-worktree-repo"
   make_dirty_repo "$installed_repo"
   git -C "$installed_repo" config user.email test@example.com
@@ -1138,8 +1457,10 @@ test_git_paths_and_change_types
 
 test_clean_repo_reports_no_changes
 test_codex_is_default_and_receives_git_context
-test_default_prepares_and_prompts_for_action
+test_interactive_commit_refuses_without_terminal_before_side_effects
 test_prepare_mode_prepares_and_exits
+test_prepare_uses_linked_worktree_commit_message_path
+test_help_documents_non_interactive_workflows
 test_quit_prints_without_preparing
 test_staged_changes_use_staged_context_only
 test_claude_provider_uses_configured_model
@@ -1164,10 +1485,25 @@ test_short_flags_match_long_workflows
 test_pr_flow_uses_selected_base_and_generated_content
 test_pr_rejects_commit_workflow_flags
 test_pr_scripted_validation
+test_pr_prompt_without_guidance
+test_pr_closes_rejects_invalid_values
+test_pr_agent_flags_require_values
+test_pr_agent_flags_require_pr_workflow
+test_pr_prepare_writes_draft_with_closing_lines
+test_pr_prompt_follows_output_requirements
+test_pr_prepare_overwrites_previous_draft
+test_pr_no_preview_appends_closing_lines
+test_pr_create_from_preserves_reviewed_content_without_provider
+test_pr_create_from_respects_assignment
+test_pr_create_from_rejects_conflicting_flags
+test_pr_create_from_rejects_branch_mismatch
+test_pr_create_from_rejects_detached_head
+test_pr_create_from_rejects_invalid_target
+test_pr_create_from_rejects_invalid_title
+test_pr_create_from_rejects_invalid_body
+test_pr_create_from_rejects_invalid_separator
 test_push_does_not_run_when_commit_has_no_staged_changes
 test_push_failure_leaves_local_commit
-test_interactive_push_pushes_only_after_commit_choice
-test_interactive_push_does_not_push_after_quit_choice
 test_push_rejects_non_commit_modes_before_generation
 test_full_rejects_non_commit_modes_regardless_of_order
 test_readme_documents_push_and_full_flags

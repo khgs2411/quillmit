@@ -1,4 +1,4 @@
-"""PR orchestration tests with fake UI and providers, using a real pseudo-terminal."""
+"""Commit and PR tests with fake UI and providers, using a real pseudo-terminal."""
 import json
 import os
 from pathlib import Path
@@ -29,6 +29,7 @@ class PullRequestFlow(unittest.TestCase):
         shutil.copy2(ROOT / "scripts/worktree", self.package / "scripts/worktree")
         shutil.copy2(ROOT / "scripts/filter-diff.py", self.package / "scripts/filter-diff.py")
         shutil.copy2(ROOT / "scripts/run-provider.py", self.package / "scripts/run-provider.py")
+        shutil.copy2(ROOT / "scripts/parse-pr-draft.py", self.package / "scripts/parse-pr-draft.py")
         (self.package / "quill.config").write_text("CODEX_FALLBACK_MODEL=\n")
         self.git("init", "-q", "-b", "master", str(self.repo), cwd=self.root)
         self.git("config", "user.name", "TUI Test")
@@ -88,7 +89,7 @@ else:
                         "root = Path(os.environ['FLOW_ROOT'])\n" + code)
         path.chmod(0o755)
 
-    def run_flow(self, actions, *args, expected_success=True):
+    def run_flow(self, actions, *args, expected_success=True, workflow="pr", choices=()):
         (self.root / "actions").write_text("\n".join(actions))
         env = dict(os.environ, FLOW_ROOT=str(self.root),
                    PATH=str(self.bin) + os.pathsep + os.environ["PATH"],
@@ -98,22 +99,37 @@ else:
         master, slave = pty.openpty()
         process = None
         try:
-            process = subprocess.Popen([str(self.package / "quill"), "pr", *args, str(self.repo)],
+            command = [str(self.package / "quill"), *([workflow] if workflow else []), *args, str(self.repo)]
+            process = subprocess.Popen(command,
                                        cwd=self.root, env=env, stdin=slave, stdout=slave, stderr=slave)
             os.close(slave)
             slave = None
             output = bytearray()
+            pending_choices = iter(choices)
+            prompt = b"[c]ommit, [e]dit, co[p]y, [r]egenerate, [q]uit: "
+            answered = 0
             deadline = time.monotonic() + 20
-            while process.poll() is None:
+            while True:
                 if time.monotonic() > deadline:
-                    self.fail("PR workflow timed out: " + output.decode(errors="replace"))
+                    self.fail("Workflow timed out: " + output.decode(errors="replace"))
                 if select.select([master], [], [], 0.1)[0]:
                     try:
-                        output.extend(os.read(master, 65536))
+                        data = os.read(master, 65536)
                     except OSError:
                         break
+                    if not data:
+                        break
+                    output.extend(data)
+                    if output.count(prompt) > answered:
+                        choice = next(pending_choices, None)
+                        if choice is not None:
+                            os.write(master, choice.encode() + b"\n")
+                            answered += 1
+                elif process.poll() is not None:
+                    break
             code = process.wait(timeout=5)
             self.assertEqual(code == 0, expected_success, output.decode(errors="replace"))
+            return output.decode(errors="replace")
         finally:
             if process is not None and process.poll() is None:
                 process.kill()
@@ -132,6 +148,66 @@ else:
         previews = (self.root / "previews").read_text()
         self.assertIn("Title for origin/master", previews)
         self.assertIn("Title for origin/stable", previews)
+
+    def test_closing_lines_and_guidance_survive_regeneration(self):
+        self.script(self.bin / "codex", r'''
+prompt = sys.stdin.read()
+assert prompt.index("Requirements:") < prompt.index("Additional guidance from the user")
+assert "Discuss rollout" in prompt
+base = re.search(r"Base branch: (.*)", prompt).group(1)
+Path(sys.argv[sys.argv.index("-o") + 1]).write_text("Title\n\nBody for " + base + "\n")
+'''.replace("prompt =", "import re\nprompt =", 1))
+        self.run_flow(["master", "back", "stable", "approve"],
+                      "--closes", "3,4", "--prompt", "Discuss rollout")
+        previews = (self.root / "previews").read_text()
+        self.assertEqual(previews.count("Closes #3\nCloses #4\n"), 2)
+        self.assertEqual(json.loads((self.root / "created").read_text())["body"],
+                         "Body for origin/stable\n\nCloses #3\nCloses #4\n")
+
+    def test_prepare_in_linked_worktree_without_terminal_or_fzf(self):
+        (self.package / ".deps/fzf/fzf").unlink()
+        linked = self.root / "linked"
+        self.git("worktree", "add", "-qb", "linked-feature", str(linked))
+        result = subprocess.run(
+            [str(self.package / "quill"), "pr", "--prepare", "--base", "master",
+             "--closes", "3,4", str(linked)], stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=dict(os.environ, FLOW_ROOT=str(self.root),
+                     PATH=str(self.bin) + os.pathsep + os.environ["PATH"],
+                     XDG_CACHE_HOME=str(self.root / "cache")))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        draft = Path(result.stdout.decode().splitlines()[-1])
+        expected = self.git("rev-parse", "--path-format=absolute", "--git-path",
+                            "QUILL_PR_EDITMSG", cwd=linked).stdout.decode().strip()
+        self.assertEqual(str(draft), expected)
+        self.assertEqual(draft.read_text(), "From: linked-feature\nInto: test/repo:master\n\n"
+                         "Title for origin/master\n\nBody for origin/master\n\nCloses #3\nCloses #4\n")
+        self.assertFalse((self.repo / ".git/QUILL_PR_EDITMSG").exists())
+        self.assertFalse((self.root / "created").exists())
+        self.assertFalse((self.root / "previews").exists())
+
+    def test_large_pr_guidance_reaches_final_synthesis(self):
+        (self.repo / "large").write_text("".join(f"Change {i} with enough context to batch\n" for i in range(1000)))
+        self.git("add", "large")
+        self.git("commit", "-qm", "Large change")
+        (self.package / "quill.config").write_text("CODEX_MAX_PROMPT_BYTES=20000\nCODEX_FALLBACK_MODEL=\n")
+        self.script(self.bin / "codex", r'''
+prompt = sys.stdin.read()
+if "Batch summaries:" in prompt:
+    assert prompt.index("Requirements:") < prompt.index("Additional guidance from the user")
+    assert "Discuss rollout" in prompt
+    (root / "synthesized").write_text(prompt)
+    message = "Combined title\n\nCombined body\n"
+else:
+    assert "Summarize this portion" in prompt
+    message = "- Behavior changed\n"
+Path(sys.argv[sys.argv.index("-o") + 1]).write_text(message)
+''')
+        self.run_flow([], "--base", "master", "--prepare", "--prompt", "Discuss rollout", "--closes", "3",
+                      "--config", str(self.package / "quill.config"))
+        self.assertTrue((self.root / "synthesized").exists())
+        self.assertFalse((self.root / "created").exists())
+        self.assertTrue((self.repo / ".git/QUILL_PR_EDITMSG").read_text().endswith("Combined body\n\nCloses #3\n"))
 
     def test_branch_cancel_does_not_generate_or_create(self):
         self.run_flow(["cancel"])
@@ -179,6 +255,54 @@ else:
         result = json.loads((self.root / "created").read_text())
         self.assertEqual(result["args"][result["args"].index("--title") + 1], "Title")
         self.assertEqual(result["body"].strip(), "Body")
+
+
+class CommitFlow(unittest.TestCase):
+    def setUp(self):
+        self.fixture = PullRequestFlow()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.fixture.script(self.fixture.bin / "codex", r'''
+(root / "generated").write_text(sys.stdin.read())
+Path(sys.argv[sys.argv.index("-o") + 1]).write_text("Generated commit title\n\nGenerated body\n")
+''')
+        (self.fixture.repo / "file").write_text("pending change\n")
+
+    def run_commit(self, *args, choices=(), expected_success=True):
+        return self.fixture.run_flow([], *args, workflow="", choices=choices,
+                                     expected_success=expected_success)
+
+    def test_default_prepares_and_prompts_for_action(self):
+        output = self.run_commit(choices=["q"])
+        self.assertIn("Prepared commit message", output)
+        self.assertIn("[c]ommit, [e]dit, co[p]y, [r]egenerate, [q]uit", output)
+        self.assertIn("Quit without committing", output)
+        self.assertEqual((self.fixture.repo / ".git/COMMIT_EDITMSG").read_text(),
+                         "Generated commit title\n\nGenerated body\n")
+        self.assertTrue(self.fixture.git("status", "--short").stdout)
+
+    def test_interactive_push_pushes_only_after_commit_choice(self):
+        self.fixture.git("add", "file")
+        self.fixture.git("push", "-qu", "origin", "feature")
+        self.run_commit("--push", choices=["c"])
+        remote_title = self.fixture.git("--git-dir", str(self.fixture.root / "remote.git"),
+                                        "log", "-1", "--pretty=%s", "feature").stdout.decode().strip()
+        self.assertEqual(remote_title, "Generated commit title")
+
+    def test_interactive_push_does_not_push_after_quit_choice(self):
+        self.fixture.git("add", "file")
+        self.fixture.git("push", "-qu", "origin", "feature")
+        before = self.fixture.git("rev-parse", "HEAD").stdout
+        self.run_commit("--push", choices=["q"])
+        self.assertEqual(self.fixture.git("--git-dir", str(self.fixture.root / "remote.git"),
+                                         "rev-parse", "feature").stdout, before)
+        self.assertTrue(self.fixture.git("diff", "--cached").stdout)
+
+    def test_unstaged_commit_refuses_before_generation_at_terminal(self):
+        output = self.run_commit("-c", expected_success=False)
+        self.assertIn("No staged changes to commit.", output)
+        self.assertIn("Stage files with git add <file> and run quill again.", output)
+        self.assertFalse((self.fixture.root / "generated").exists())
 
 
 if __name__ == "__main__":

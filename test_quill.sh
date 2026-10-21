@@ -1204,12 +1204,12 @@ test_install_links_agent_guide_to_existing_global_instructions() {
 test_install_detects_agent_guide_links_with_trailing_whitespace() {
   local source="$TMP_ROOT/whitespace-source" target="$TMP_ROOT/whitespace-target" output
   make_install_source "$source"
-  local -x HOME="$target/home" CODEX_HOME="$target/codex" PATH="$source/fake-bin:$PATH"
+  local -x HOME="$target/home" CODEX_HOME="$target/codex [custom]" PATH="$source/fake-bin:$PATH"
   mkdir -p "$HOME/.claude" "$CODEX_HOME"
   printf 'Before\n@QUILLMIT.md \t\nAfter without a newline' > "$HOME/.claude/CLAUDE.md"
   printf 'Before\r\n@QUILLMIT.md\r\nAfter\r\n' > "$CODEX_HOME/AGENTS.md"
   cp "$HOME/.claude/CLAUDE.md" "$target/expected-claude"
-  cp "$CODEX_HOME/AGENTS.md" "$target/expected-codex"
+  printf 'Before\r\n@%s/QUILLMIT.md\r\nAfter\r\n' "$CODEX_HOME" > "$target/expected-codex"
   output="$("$source/install" --bin-dir "$target/bin" --install-root "$target/packages" 2>&1)" || fail "$output"
   assert_contains "$output" "refreshed: $HOME/.claude/CLAUDE.md"
   assert_contains "$output" "refreshed: $CODEX_HOME/AGENTS.md"
@@ -1225,7 +1225,7 @@ test_install_refreshes_agent_guide_without_rewriting_existing_links() {
   mkdir -p "$HOME/.claude" "$CODEX_HOME"
   printf 'Claude instructions without a final newline' > "$HOME/.claude/CLAUDE.md"
   printf 'Before\n@QUILLMIT.md\n\nAfter without a final newline' > "$CODEX_HOME/AGENTS.md"
-  cp "$CODEX_HOME/AGENTS.md" "$target/expected-codex"
+  printf 'Before\n@%s/QUILLMIT.md\n\nAfter without a final newline' "$CODEX_HOME" > "$target/expected-codex"
   printf 'Claude instructions without a final newline\n\n@QUILLMIT.md\n' > "$target/expected-claude"
   cat > "$target/expected-guide" <<'GUIDE'
 # Quillmit
@@ -1300,6 +1300,7 @@ test_install_remembers_agent_guide_opt_out_across_versions() {
   "$source/install" --bin-dir "$target/bin" --install-root "$target/packages" >/dev/null 2>&1
   printf '\n@QUILLMIT.md\nTail without a newline' > "$HOME/.claude/CLAUDE.md"
   printf 'Keep\r\n@QUILLMIT.md \t\n @QUILLMIT.md\n\n@QUILLMIT.md\r\nAfter\\literal\n@QUILLMIT.md \t\r' > "$CODEX_HOME/AGENTS.md"
+  printf '\n@%s/QUILLMIT.md \t\r' "$CODEX_HOME" >> "$CODEX_HOME/AGENTS.md"
   printf 'Keep\r\n @QUILLMIT.md\n\nAfter\\literal\n' > "$target/expected"
   output="$("$source/install" --bin-dir "$target/bin" --install-root "$target/packages" --no-agent-guide 2>&1)" || fail "$output"
   for instructions in "$HOME/.claude/CLAUDE.md" "$CODEX_HOME/AGENTS.md"; do
@@ -1325,7 +1326,9 @@ test_install_remembers_agent_guide_opt_out_across_versions() {
   "$source/install" --bin-dir "$target/bin" --install-root "$target/packages" >/dev/null 2>&1
   for instructions in "$HOME/.claude/CLAUDE.md" "$CODEX_HOME/AGENTS.md"; do
     cmp -s "$source/QUILLMIT.md" "${instructions:h}/QUILLMIT.md" || fail 'opt-in failed to restore guide'
-    assert_equals "$(grep -Fxc '@QUILLMIT.md' "$instructions")" 1
+    local expected_link='@QUILLMIT.md'
+    [[ "$instructions" != "$CODEX_HOME/AGENTS.md" ]] || expected_link="@$CODEX_HOME/QUILLMIT.md"
+    assert_equals "$(grep -Fxc "$expected_link" "$instructions")" 1
   done
 }
 
@@ -1357,7 +1360,7 @@ test_install_can_skip_agent_files_without_changing_remembered_preference() {
   cmp -s "$target/expected-guide" "$CODEX_HOME/QUILLMIT.md" || fail 'check install touched guide'
   [[ ! -e "$HOME/.claude/CLAUDE.md" && ! -e "$HOME/.claude/QUILLMIT.md" ]] || fail 'check install created agent files'
   "$source/install" --bin-dir "$target/bin" --install-root "$target/packages" >/dev/null 2>&1
-  grep -Fxq '@QUILLMIT.md' "$CODEX_HOME/AGENTS.md" || fail 'check install recorded an opt-out'
+  grep -Fxq "@$CODEX_HOME/QUILLMIT.md" "$CODEX_HOME/AGENTS.md" || fail 'check install recorded an opt-out'
   "$source/install" --bin-dir "$target/bin" --install-root "$target/packages" --no-agent-guide >/dev/null 2>&1
   cp "$CODEX_HOME/AGENTS.md" "$target/expected-instructions"
   QUILLMIT_SKIP_AGENT_GUIDE=1 "$source/install" --bin-dir "$target/bin" --install-root "$target/packages" --agent-guide >/dev/null 2>&1

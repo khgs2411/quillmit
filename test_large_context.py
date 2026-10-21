@@ -88,6 +88,11 @@ class Harness:
             script = self.bin / name
             script.write_text(f"#!{sys.executable}\n" + FAKE_PROVIDER)
             script.chmod(0o755)
+        gh = self.bin / "gh"
+        gh.write_text(f"#!{sys.executable}\nimport sys\n"
+                      "if sys.argv[1:3] != ['repo', 'view']: sys.exit('Unsupported fake gh command')\n"
+                      "print('test/repo')\n")
+        gh.chmod(0o755)
         with sqlite3.connect(root / "calls.db") as db:
             db.executescript("CREATE TABLE state(active, peak); INSERT INTO state VALUES (0,0); CREATE TABLE calls(prompt BLOB);")
         self.config = root / "quill.config"
@@ -114,6 +119,16 @@ class Harness:
         assert not any(path.is_dir() for path in self.root.glob("quill.*")), "Temporary generation files remain"
         return result
 
+    def pr(self, repo, *flags, failure=False):
+        before = snapshot(repo)
+        result = subprocess.run([str(ROOT / "quill"), "pr", "--config", str(self.config), "--prepare",
+                                 "--no-preview", "--base", "main", *flags, str(repo)],
+                                env=self.env, capture_output=True, timeout=60)
+        assert snapshot(repo) == before, "PR generation changed Git state"
+        assert (result.returncode != 0) == failure, result.stderr.decode()
+        assert not any(path.is_dir() for path in self.root.glob("quill.*")), "Temporary generation files remain"
+        return result
+
     def calls(self):
         with sqlite3.connect(self.root / "calls.db") as db:
             prompts = [row[0] for row in db.execute("SELECT prompt FROM calls ORDER BY rowid")]
@@ -127,6 +142,86 @@ def staged_repo(path, content):
         (path / name).write_bytes(data)
     git(path, "add", "--all")
     return path
+
+
+def pr_repo(path, commits):
+    """A feature branch of (file, content, message) commits on top of a pushed main."""
+    remote = path.with_suffix(".git")
+    run("git", "init", "-q", "--bare", str(remote))
+    run("git", "init", "-q", "-b", "main", str(path))
+    for key, value in (("user.email", "test@example.com"), ("user.name", "Test User")):
+        git(path, "config", key, value)
+    git(path, "remote", "add", "origin", str(remote))
+    (path / "base.txt").write_text("base\n")
+    git(path, "add", "base.txt")
+    git(path, "commit", "-q", "-m", "Initial")
+    git(path, "push", "-q", "-u", "origin", "main")
+    git(path, "switch", "-q", "-c", "feature")
+    for name, content, message in commits:
+        (path / name).write_bytes(content)
+        git(path, "add", name)
+        git(path, "commit", "-q", "-m", message)
+    return path
+
+
+def bulk(label, lines=400):
+    return b"".join(f"{label} line {i}: preserve meaningful source behavior\n".encode() for i in range(lines))
+
+
+def check_large_pr_digest(root):
+    repo = pr_repo(root / "pr-digest", [
+        ("first.txt", bulk("first"), "Add the first module\n\nExplains why the first module exists."),
+        ("second.txt", bulk("second"), "Add the second module\n\nExplains why the second module exists."),
+    ])
+    harness = Harness(root / "pr-digest-run")
+    result = harness.pr(repo)
+    prompts, active, peak = harness.calls()
+    assert len(prompts) == 1 and active == 0, f"{len(prompts)} provider calls"
+    prompt = prompts[0]
+    assert len(prompt) <= 20000
+    assert b"Summarize this portion" not in prompt
+    first, second = prompt.index(b"Add the first module"), prompt.index(b"Add the second module")
+    assert first < second, "Commits are not oldest first"
+    for text in (b"Explains why the first module exists.", b"Explains why the second module exists.",
+                 b"first.txt", b"second.txt", b"2 files changed"):
+        assert text in prompt, text
+    assert b"first line 0:" not in prompt and b"@@" not in prompt, "Digest prompt contains diff hunks"
+    assert b"writing from commit messages" in result.stdout, result.stdout
+    print("PASS: large PR drafts from full commit messages and diffstat in one call, without the diff")
+
+    long_body = "\n".join(f"Body detail {i} that only the full digest carries." for i in range(500))
+    repo = pr_repo(root / "pr-subjects", [
+        ("first.txt", bulk("first"), f"Add the first module\n\n{long_body}"),
+        ("second.txt", bulk("second"), "Add the second module"),
+    ])
+    harness = Harness(root / "pr-subjects-run")
+    result = harness.pr(repo)
+    prompts = harness.calls()[0]
+    assert len(prompts) == 1 and len(prompts[0]) <= 20000
+    assert b"Add the first module" in prompts[0] and b"Body detail" not in prompts[0]
+    assert b"writing from commit subjects" in result.stdout, result.stdout
+    print("PASS: large PR falls back to commit subjects when full messages exceed the budget")
+
+    repo = pr_repo(root / "pr-oversized", [("first.txt", bulk("first"), "Subject " * 3000)])
+    harness = Harness(root / "pr-oversized-run")
+    result = harness.pr(repo, failure=True)
+    assert harness.calls()[0] == []
+    assert re.search(rb"CODEX_MAX_PROMPT_BYTES \(\d+ > 20000\)", result.stderr), result.stderr
+    print("PASS: large PR fails before any provider call when even commit subjects exceed the budget")
+
+    repo = pr_repo(root / "pr-merges", [("first.txt", bulk("first"), "Add the first module")])
+    git(repo, "switch", "-q", "-c", "side")
+    (repo / "side.txt").write_bytes(bulk("side"))
+    git(repo, "add", "side.txt")
+    git(repo, "commit", "-q", "-m", "Add the side module")
+    git(repo, "switch", "-q", "feature")
+    git(repo, "merge", "-q", "--no-ff", "-m", "Merge branch side", "side")
+    harness = Harness(root / "pr-merges-run")
+    harness.pr(repo, "--prompt", "Mention the rollout plan")
+    prompt = harness.calls()[0][0]
+    assert b"Add the side module" in prompt and b"Merge branch side" not in prompt
+    assert b"Mention the rollout plan" in prompt
+    print("PASS: large PR digest skips merge commits and keeps --prompt guidance")
 
 
 def check_payloads(root):
@@ -349,5 +444,6 @@ if __name__ == "__main__":
         check_cancel(root, repo)
         check_terminal_ui(root, repo)
         check_action_ui(root)
+        check_large_pr_digest(root)
         if args.staged_repo:
             check_staged(root, args.staged_repo.resolve())

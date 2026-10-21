@@ -186,21 +186,18 @@ Path(sys.argv[sys.argv.index("-o") + 1]).write_text("Title\n\nBody for " + base 
         self.assertFalse((self.root / "created").exists())
         self.assertFalse((self.root / "previews").exists())
 
-    def test_large_pr_guidance_reaches_final_synthesis(self):
+    def test_large_pr_guidance_reaches_commit_digest(self):
         (self.repo / "large").write_text("".join(f"Change {i} with enough context to batch\n" for i in range(1000)))
         self.git("add", "large")
         self.git("commit", "-qm", "Large change")
         (self.package / "quill.config").write_text("CODEX_MAX_PROMPT_BYTES=20000\nCODEX_FALLBACK_MODEL=\n")
         self.script(self.bin / "codex", r'''
 prompt = sys.stdin.read()
-if "Batch summaries:" in prompt:
-    assert prompt.index("Requirements:") < prompt.index("Additional guidance from the user")
-    assert "Discuss rollout" in prompt
-    (root / "synthesized").write_text(prompt)
-    message = "Combined title\n\nCombined body\n"
-else:
-    assert "Summarize this portion" in prompt
-    message = "- Behavior changed\n"
+assert "from the commit history below" in prompt and "Summarize this portion" not in prompt
+assert prompt.index("Requirements:") < prompt.index("Additional guidance from the user")
+assert "Discuss rollout" in prompt
+(root / "synthesized").write_text(prompt)
+message = "Combined title\n\nCombined body\n"
 Path(sys.argv[sys.argv.index("-o") + 1]).write_text(message)
 ''')
         self.run_flow([], "--base", "master", "--prepare", "--prompt", "Discuss rollout", "--closes", "3",

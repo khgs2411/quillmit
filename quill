@@ -773,6 +773,15 @@ write_pr_guidance() {
   fi
 }
 
+write_pr_commits() {
+  case "${1:-}" in
+    messages) git -C "$REPO" log --reverse --no-merges --format='- %h %B' "$PR_BASE_REF..HEAD" ;;
+    subjects) git -C "$REPO" log --reverse --no-merges --format='- %h %s' "$PR_BASE_REF..HEAD" ;;
+    *) git -C "$REPO" log --format='- %h %s' "$PR_BASE_REF..HEAD" ;;
+  esac
+}
+
+# $1 selects the PR commit listing: empty for the diff prompt, messages or subjects for a digest.
 write_git_overview() {
   print -- "Repository:"
   print -- "$REPO"
@@ -784,8 +793,12 @@ write_git_overview() {
     print -- "Base branch: $PR_BASE_REMOTE/$PR_BASE_BRANCH"
     print -- "Head branch: $PR_HEAD_BRANCH"
     print -- ""
-    print -- "Commits in the pull request:"
-    git -C "$REPO" log --format='- %h %s' "$PR_BASE_REF..HEAD"
+    if [[ -n "${1:-}" ]]; then
+      print -- "Commits in the pull request, oldest first:"
+    else
+      print -- "Commits in the pull request:"
+    fi
+    write_pr_commits "${1:-}"
     print -- ""
     print -- "Pull request diff --stat:"
     git -C "$REPO" diff --no-ext-diff --stat "$PR_BASE_REF...HEAD"
@@ -854,6 +867,23 @@ write_git_context() {
       print -- "Unstaged diff:"
       write_diff
     fi
+  } > "$PROMPT_FILE"
+}
+
+# A PR too large for its diff is drafted from its commit history (docs/adr/0002).
+write_pr_digest_prompt() {
+  {
+    print -- "Generate a pull request title and description from the commit history below."
+    print -- ""
+    print -- "Do not inspect the repository yourself. Do not run commands. Do not modify files. Do not stage files. Do not commit."
+    print -- ""
+    print -- "The diff is omitted because it exceeds the prompt budget."
+    print -- "Commit messages may describe work that a later commit changed or reverted; check them against the diff --stat."
+    print -- ""
+    write_output_requirements
+    write_pr_guidance
+    print -- ""
+    write_git_overview "$1"
   } > "$PROMPT_FILE"
 }
 
@@ -970,11 +1000,7 @@ write_batch_prompts() {
   local batch
   for ((batch = 1; batch <= BATCH_COUNT; batch++)); do
     {
-      if [[ "$WORKFLOW" == "pr" ]]; then
-        print -- "Summarize this portion of a larger Git change for a final pull-request writer."
-      else
-        print -- "Summarize this portion of a larger Git change for a final commit-message writer."
-      fi
+      print -- "Summarize this portion of a larger Git change for a final commit-message writer."
       print -- "Do not inspect the repository, run commands, modify files, stage files, or commit."
       print -- "Identify intent and externally meaningful behavior across files; do not produce the final text."
       print -- "Return at most six concise bullets covering intent, behavior/contracts, tests, documentation, and material risks."
@@ -991,11 +1017,7 @@ write_batch_prompts() {
 
 write_synthesis_prompt() {
   {
-    if [[ "$WORKFLOW" == "pr" ]]; then
-      print -- "Generate one pull request title and description from summaries of a large Git diff."
-    else
-      print -- "Generate one git commit message from summaries of a large Git diff."
-    fi
+    print -- "Generate one git commit message from summaries of a large Git diff."
     print -- "Do not inspect the repository yourself. Do not run commands. Do not modify files. Do not stage files. Do not commit."
     print -- "Synthesize the overall intent; summaries may overlap, so do not concatenate or mechanically enumerate them."
     print -- ""
@@ -1327,7 +1349,21 @@ generate_message() {
   local batched=0
   local prompt_kib
   local file_word
-  if [[ "$prompt_bytes" -gt "$MAX_PROMPT_BYTES" ]]; then
+  if [[ "$WORKFLOW" == "pr" && "$prompt_bytes" -gt "$MAX_PROMPT_BYTES" ]]; then
+    prompt_kib=$(((prompt_bytes + 1023) / 1024))
+    local digest
+    for digest in messages subjects; do
+      write_pr_digest_prompt "$digest"
+      [[ "$(wc -c < "$PROMPT_FILE" | tr -d ' ')" -le "$MAX_PROMPT_BYTES" ]] && break
+    done
+    local digest_bytes
+    digest_bytes="$(wc -c < "$PROMPT_FILE" | tr -d ' ')"
+    if [[ "$digest_bytes" -gt "$MAX_PROMPT_BYTES" ]]; then
+      print -u2 -- "Pull request commit subjects exceed ${PROVIDER:u}_MAX_PROMPT_BYTES ($digest_bytes > $MAX_PROMPT_BYTES)."
+      return 1
+    fi
+    ui_log "Large pull request: $(git -C "$REPO" rev-list --count --no-merges "$PR_BASE_REF..HEAD") commits, ${prompt_kib} KiB; writing from commit $digest."
+  elif [[ "$prompt_bytes" -gt "$MAX_PROMPT_BYTES" ]]; then
     build_batches
     write_batch_prompts
     batched=1

@@ -179,7 +179,6 @@ for installed_dir in "$INSTALL_ROOT/versions"/*(N); do
 done
 
 guide_opt_out="$INSTALL_ROOT/agent-guide-disabled"
-guide_link_pattern='^@QUILLMIT\.md[[:space:]]*$'
 for instructions in "$HOME/.claude/CLAUDE.md" "${CODEX_HOME:-$HOME/.codex}/AGENTS.md"; do
   if [[ "${QUILLMIT_SKIP_AGENT_GUIDE:-}" == 1 ]]; then
     print -- "Agent Guide skipped (this run): $instructions"
@@ -193,37 +192,49 @@ for instructions in "$HOME/.claude/CLAUDE.md" "${CODEX_HOME:-$HOME/.codex}/AGENT
     print -- "Agent Guide skipped (file absent): $instructions"
     continue
   fi
+  guide_link='@QUILLMIT.md'
+  if [[ "$instructions" == "${CODEX_HOME:-$HOME/.codex}/AGENTS.md" ]]; then
+    guide_link="@${instructions:h}/QUILLMIT.md"
+    [[ "$instructions" == /* ]] || guide_link="@$PWD/${instructions:h}/QUILLMIT.md"
+  fi
+  guide_found=0
+  guide_tmp="$(mktemp "${TMPDIR:-/tmp}/quill-agent-guide.XXXXXX")"
+  # Match owned links literally; paths may contain spaces or regex characters.
+  # Preserve surrounding content, line endings and a missing final newline.
+  {
+    while true; do
+      guide_newline=1
+      IFS= read -r guide_line || guide_newline=0
+      [[ "$guide_newline" == 1 || -n "$guide_line" ]] || break
+      guide_text="${guide_line%"${guide_line##*[![:space:]]}"}"
+      if [[ "$guide_text" == '@QUILLMIT.md' || "$guide_text" == "$guide_link" ]]; then
+        guide_found=1
+        [[ "$AGENT_GUIDE" == --no-agent-guide ]] && continue
+        guide_line="$guide_link${guide_line#"$guide_text"}"
+      fi
+      printf '%s' "$guide_line"
+      [[ "$guide_newline" == 0 ]] || printf '\n'
+    done
+  } < "$instructions" > "$guide_tmp"
+  if [[ "$guide_found" == 1 ]]; then
+    cat "$guide_tmp" > "$instructions"
+  fi
+  rm "$guide_tmp"
+  guide_tmp=""
   if [[ "$AGENT_GUIDE" == --no-agent-guide ]]; then
-    if grep -Eq "$guide_link_pattern" "$instructions"; then
-      guide_tmp="$(mktemp "${TMPDIR:-/tmp}/quill-agent-guide.XXXXXX")"
-      # Preserve every other byte, including a final line without a newline.
-      {
-        while IFS= read -r guide_line; do
-          if [[ ! "$guide_line" =~ $guide_link_pattern ]]; then
-            print -r -- "$guide_line"
-          fi
-        done
-        if [[ -n "$guide_line" && ! "$guide_line" =~ $guide_link_pattern ]]; then
-          printf '%s' "$guide_line"
-        fi
-      } < "$instructions" > "$guide_tmp"
-      cat "$guide_tmp" > "$instructions"
-      rm "$guide_tmp"
-      guide_tmp=""
-    fi
     rm -f "${instructions:h}/QUILLMIT.md"
     print -- "Agent Guide removed: $instructions"
     continue
   fi
   cp "$VERSION_DIR/QUILLMIT.md" "${instructions:h}/QUILLMIT.md"
-  if grep -Eq "$guide_link_pattern" "$instructions"; then
+  if [[ "$guide_found" == 1 ]]; then
     print -- "Agent Guide refreshed: $instructions"
   else
     # Terminate an existing last line before adding the separating blank line.
     if [[ -s "$instructions" && -n "$(tail -c 1 "$instructions")" ]]; then
       print >> "$instructions"
     fi
-    print -r -- $'\n@QUILLMIT.md' >> "$instructions"
+    printf '\n%s\n' "$guide_link" >> "$instructions"
     print -- "Agent Guide linked: $instructions"
   fi
   if [[ "$instructions" == "${CODEX_HOME:-$HOME/.codex}/AGENTS.md" ]]; then

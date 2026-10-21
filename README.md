@@ -170,8 +170,10 @@ leaves the existing launcher in place; fix the reported cause and run it again.
 
 Install writes a Quillmit-owned `QUILLMIT.md` next to each existing
 `~/.claude/CLAUDE.md` and `${CODEX_HOME:-~/.codex}/AGENTS.md`, and appends
-`@QUILLMIT.md` once. It refreshes the guide on every install, preserves the rest
-of your instructions, and reports which files it linked, refreshed, or skipped.
+`@QUILLMIT.md` for Claude Code and an absolute `@/path/to/QUILLMIT.md` for Codex
+once. Existing relative Codex links are migrated to the absolute path so agents
+can find the guide from any checkout. It refreshes the guide on every install,
+preserves the rest of your instructions, and reports which files it linked, refreshed, or skipped.
 It does not create instructions files for tools you do not use.
 Link detection ignores trailing whitespace, including CRLF line endings.
 
@@ -241,6 +243,13 @@ batches sequentially, and makes one final provider call to synthesize the commit
 message. A single file larger than a batch is split at diff-hunk boundaries,
 with a byte-bounded fallback for an individual oversized hunk.
 
+A pull request whose Git context exceeds the budget is drafted in one provider
+call from its commit history instead of the diff: every non-merge commit's full
+message, oldest first, plus the diff `--stat`. If the full messages do not fit,
+Quillmit uses commit subjects only; if those do not fit either, it stops before
+calling the provider. The draft is only as good as the commit messages
+([why](docs/adr/0002-large-prs-draft-from-commit-messages.md)).
+
 Before measuring or batching context, Quillmit replaces valid inline Base64 data
 URL payloads with placeholders retaining the media type, normalized encoded byte
 count, and SHA-256 fingerprint. Filtering recognizes literal JavaScript/JSON
@@ -249,7 +258,7 @@ payloads, and concatenated string literals. Headers and URL fragments, surroundi
 code, string joins, and diff markers are preserved. Bare Base64 and malformed
 data URLs remain untouched. No source code is evaluated.
 This only changes AI context; staged files remain untouched. Commit and PR
-generation use the same filtering and sequential execution. A failed batch stops
+generation use the same filtering. A failed batch stops
 generation before synthesis. Cancellation terminates the active provider process
 group and waits for its supervisor before removing temporary files.
 

@@ -84,10 +84,11 @@ python3 test_tui_real.py
 python3 test_worktree_live.py
 ```
 
-`test_large_context.py` uses fake providers and disposable staged repositories
-without creating commits or installing anything. It checks payload filtering,
+`test_large_context.py` uses fake providers and disposable repositories without
+installing anything or creating commits outside them. It checks payload filtering,
 sequential batches, failure handling, cancellation, timestamped terminal output,
-and commit/push timing through fake Git actions. To also verify an existing
+commit/push timing through fake Git actions, and large PRs drafted from commit
+messages with their subjects fallback. To also verify an existing
 repository's staged diff through the read-only `--quit` flow:
 
 ```sh

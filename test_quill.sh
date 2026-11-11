@@ -45,6 +45,9 @@ args_capture="\${${name:u}_ARGS_CAPTURE:-}"
 if [[ -n "\$args_capture" ]]; then
   print -r -- "\$*" > "\$args_capture"
 fi
+if [[ -n "\${QUILL_ARGS_JSON_CAPTURE:-}" ]]; then
+  python3 -c 'import json, sys; print(json.dumps(sys.argv[1:]))' "\$@" > "\$QUILL_ARGS_JSON_CAPTURE"
+fi
 while [[ \$# -gt 0 ]]; do
   case "\$1" in
     -o|--output-last-message)
@@ -358,15 +361,34 @@ test_claude_provider_uses_configured_model() {
   local repo="$TMP_ROOT/claude"
   make_dirty_repo "$repo"
   local args_capture="$TMP_ROOT/claude-args.txt"
+  local json_capture="$TMP_ROOT/claude-args.json"
 
   local output
-  output="$(CLAUDE_ARGS_CAPTURE="$args_capture" PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --claude --quit "$repo")"
+  output="$(QUILL_ARGS_JSON_CAPTURE="$json_capture" CLAUDE_ARGS_CAPTURE="$args_capture" PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --claude --quit "$repo")"
 
   assert_contains "$output" "Generating commit message with Claude"
   assert_contains "$output" "Feature: Add Claude-backed commit message generation"
-  assert_contains "$(<"$args_capture")" "--model haiku"
-  assert_contains "$(<"$args_capture")" "--bare"
+  assert_contains "$(<"$args_capture")" "--model claude-haiku-5-5"
+  assert_not_contains "$(<"$args_capture")" "--bare"
+  python3 - "$json_capture" <<'PY'
+import json, sys
+args = json.load(open(sys.argv[1]))
+for flag in ("--safe-mode", "--no-session-persistence", "--strict-mcp-config"):
+    assert flag in args, args
+assert args[args.index("--tools") + 1] == "", args
+assert args[args.index("--setting-sources") + 1] == "", args
+assert "--settings" not in args, args
+PY
   assert_contains "$(<"$args_capture")" "-p"
+
+  # An incomplete custom config still uses the built-in Claude defaults.
+  local config="$TMP_ROOT/claude-defaults.config"
+  print -- DEFAULT_PROVIDER=claude > "$config"
+  output="$("$ROOT/quill" --which --config "$config")"
+  assert_contains "$output" "Model: claude-haiku-5-5"
+  assert_contains "$output" "Reasoning: n/a"
+  assert_contains "$output" "Fast: false"
+  assert_contains "$(<"$ROOT/quill.config")" "CLAUDE_FALLBACK_MODEL=claude-haiku-5-5"
 }
 
 test_gemini_provider_uses_configured_model() {
@@ -398,6 +420,129 @@ CONFIG
 
   assert_contains "$output" "Generating commit message with Claude"
   assert_contains "$(<"$args_capture")" "--model claude-haiku-4-5-20251001"
+}
+
+test_settings_target_selected_provider() {
+  local config="$TMP_ROOT/settings.config" output
+  cat > "$config" <<'CONFIG'
+# Keep this comment and unrelated settings.
+DEFAULT_PROVIDER=claude
+CODEX_MODEL=codex-before
+CODEX_REASONING_EFFORT=high
+CODEX_SERVICE_TIER=fast
+CLAUDE_MODEL=claude-opus-5-5
+CLAUDE_FALLBACK_MODEL=claude-opus-5-5
+CLAUDE_FAST=false
+GEMINI_MODEL=gemini-before
+CONFIG
+  output="$("$ROOT/quill" --config "$config" --model claude-sonnet-5)"
+  assert_contains "$output" "Updated Claude settings"
+  assert_contains "$(<"$config")" "CLAUDE_MODEL=claude-sonnet-5"
+  assert_contains "$(<"$config")" "CODEX_MODEL=codex-before"
+  assert_contains "$(<"$config")" "# Keep this comment"
+  "$ROOT/quill" --model gpt-6-sol --reasoning ultra --codex --config "$config" >/dev/null
+  assert_contains "$(<"$config")" "CODEX_MODEL=gpt-6-sol"
+  assert_contains "$(<"$config")" "CODEX_REASONING_EFFORT=ultra"
+  "$ROOT/quill" --provider codex --fast false --config "$config" >/dev/null
+  assert_contains "$(<"$config")" "CODEX_SERVICE_TIER=default"
+  "$ROOT/quill" --claude --fast true --config "$config" >/dev/null
+  assert_contains "$(<"$config")" "CLAUDE_FAST=true"
+  output="$("$ROOT/quill" --which --config "$config")"
+  assert_contains "$output" "Provider: claude"
+  assert_contains "$output" "Reasoning: n/a"
+  assert_contains "$output" "Fast: true"
+  "$ROOT/quill" --provider claude --model default --config "$config" >/dev/null
+  assert_contains "$(<"$config")" "CLAUDE_MODEL=claude-haiku-5-5"
+  assert_contains "$(<"$config")" "CLAUDE_FAST=true"
+  assert_contains "$(<"$config")" "CLAUDE_FALLBACK_MODEL=claude-opus-5-5"
+  "$ROOT/quill" --claude --fast false --config "$config" >/dev/null
+  assert_contains "$("$ROOT/quill" --which --config "$config")" "Fast: false"
+  "$ROOT/quill" --codex --model default --config "$config" >/dev/null
+  assert_contains "$(<"$config")" "CODEX_MODEL=gpt-6-luna"
+  assert_contains "$(<"$config")" "CODEX_REASONING_EFFORT=low"
+  assert_contains "$(<"$config")" "CODEX_SERVICE_TIER=default"
+  "$ROOT/quill" --provider gemini --model gemini-custom --config "$config" >/dev/null
+  assert_contains "$(<"$config")" "GEMINI_MODEL=gemini-custom"
+  assert_contains "$("$ROOT/quill" --codex --which --config "$config")" "Provider: codex"
+
+  # Settings still default to Codex and create the personal config without Git/AI.
+  local -x XDG_CONFIG_HOME="$TMP_ROOT/personal-settings"
+  output="$("$ROOT/quill" --model gpt-6-sol --reasoning high)"
+  assert_contains "$output" "Updated Codex settings"
+  assert_contains "$(<"$XDG_CONFIG_HOME/quillmit/quill.config")" "CODEX_MODEL=gpt-6-sol"
+  "$ROOT/quill" --claude --model claude-custom >/dev/null
+  assert_contains "$(<"$XDG_CONFIG_HOME/quillmit/quill.config")" "CLAUDE_MODEL=claude-custom"
+  assert_contains "$(<"$XDG_CONFIG_HOME/quillmit/quill.config")" "CODEX_MODEL=gpt-6-sol"
+}
+
+test_claude_settings_refuse_reasoning_and_haiku_fast_without_writes() {
+  local config="$TMP_ROOT/refused-settings.config" failure="$TMP_ROOT/settings-failure"
+  local primary fallback
+  for primary fallback in claude-HaIkU-5-5 claude-opus-5-5 claude-opus-5-5 custom-HAIKU-fallback; do
+    print -rl -- DEFAULT_PROVIDER=claude "CLAUDE_MODEL=$primary" "CLAUDE_FALLBACK_MODEL=$fallback" CLAUDE_FAST=false > "$config"
+    cp "$config" "$config.before"
+    if "$ROOT/quill" --fast true --config "$config" > "$failure" 2>&1; then
+      fail 'expected Haiku fast settings rejection'
+    fi
+    assert_contains "$(<"$failure")" "Haiku has no fast mode"
+    cmp -s "$config" "$config.before" || fail 'rejected fast setting changed config'
+  done
+  if "$ROOT/quill" --claude --reasoning high --config "$config" > "$failure" 2>&1; then
+    fail 'expected Claude reasoning rejection'
+  fi
+  assert_contains "$(<"$failure")" "--reasoning"
+  assert_contains "$(<"$failure")" "Claude"
+  cmp -s "$config" "$config.before" || fail 'rejected reasoning changed config'
+  # Both values are checked against the proposed model in a combined edit.
+  if "$ROOT/quill" --claude --model haiku --fast true --config "$config" > "$failure" 2>&1; then
+    fail 'expected proposed Haiku model rejection'
+  fi
+  assert_contains "$(<"$failure")" "Haiku has no fast mode"
+  print -rl -- DEFAULT_PROVIDER=claude CLAUDE_MODEL=haiku CLAUDE_FALLBACK_MODEL=claude-opus-5-5 > "$config"
+  "$ROOT/quill" --model claude-opus-5-5 --fast true --config "$config" >/dev/null
+  assert_contains "$(<"$config")" "CLAUDE_FAST=true"
+}
+
+test_claude_fast_is_invocation_only_and_blocks_haiku_before_cli() {
+  local repo="$TMP_ROOT/claude-fast" config="$TMP_ROOT/claude-fast.config"
+  local capture="$TMP_ROOT/claude-fast.json" failure="$TMP_ROOT/claude-fast-failure"
+  make_dirty_repo "$repo"
+  local primary fallback
+  for primary fallback in claude-haiku-5-5 claude-opus-5-5 claude-opus-5-5 custom-HAIKU-fallback; do
+    print -rl -- "CLAUDE_MODEL=$primary" "CLAUDE_FALLBACK_MODEL=$fallback" CLAUDE_FAST=true > "$config"
+    if QUILL_ARGS_JSON_CAPTURE="$capture" PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --claude --config "$config" --quit "$repo" > "$failure" 2>&1; then
+      fail 'expected execution to reject Haiku fast mode'
+    fi
+    assert_contains "$(<"$failure")" "Haiku has no fast mode"
+    [[ ! -e "$capture" ]] || fail 'Claude was called with Haiku fast mode'
+  done
+  print -rl -- CLAUDE_MODEL=claude-opus-5-5 CLAUDE_FALLBACK_MODEL=claude-opus-5-5 CLAUDE_FAST=true > "$config"
+  cp "$config" "$config.before"
+  QUILL_ARGS_JSON_CAPTURE="$capture" PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --claude --config "$config" --quit "$repo" >/dev/null
+  python3 - "$capture" <<'PY'
+import json, sys
+args = json.load(open(sys.argv[1]))
+assert json.loads(args[args.index("--settings") + 1]) == {"fastMode": True}, args
+assert "--safe-mode" in args and "--no-session-persistence" in args, args
+assert args[args.index("--tools") + 1] == "", args
+PY
+  cmp -s "$config" "$config.before" || fail 'execution changed config'
+  print -rl -- CLAUDE_MODEL=claude-opus-5-5 CLAUDE_FAST=false > "$config"
+  QUILL_ARGS_JSON_CAPTURE="$capture" PATH="$(make_fake_bin):$PATH" "$ROOT/quill" --claude --config "$config" --quit "$repo" >/dev/null
+  python3 - "$capture" <<'PY'
+import json, sys
+assert "--settings" not in json.load(open(sys.argv[1]))
+PY
+}
+
+test_claude_fast_guard_allows_worktree_commands_without_ai() {
+  local repo="$TMP_ROOT/claude-fast-worktree" config="$TMP_ROOT/claude-fast-worktree.config"
+  local capture="$TMP_ROOT/claude-fast-worktree.json" output
+  make_dirty_repo "$repo"
+  print -rl -- DEFAULT_PROVIDER=claude CLAUDE_MODEL=haiku CLAUDE_FAST=true > "$config"
+  output="$(QUILL_ARGS_JSON_CAPTURE="$capture" PATH="$(make_fake_bin):$PATH" "$ROOT/quill" worktree list --config "$config" --repo "$repo")"
+  assert_contains "$output" "${repo:A}"
+  [[ ! -e "$capture" ]] || fail 'worktree listing called an AI CLI'
 }
 
 test_large_context_uses_sequential_batches_and_synthesis() {
@@ -1654,6 +1799,10 @@ test_staged_changes_use_staged_context_only
 test_claude_provider_uses_configured_model
 test_gemini_provider_uses_configured_model
 test_config_overrides_default_provider_and_models
+test_settings_target_selected_provider
+test_claude_settings_refuse_reasoning_and_haiku_fast_without_writes
+test_claude_fast_is_invocation_only_and_blocks_haiku_before_cli
+test_claude_fast_guard_allows_worktree_commands_without_ai
 test_large_context_uses_sequential_batches_and_synthesis
 test_single_oversized_file_splits_across_batches
 test_batch_budget_is_selected_per_provider

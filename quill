@@ -17,8 +17,8 @@ Usage:
   quill worktree create [intent] [--branch name] [--from ref] [--remote name] [--no-preview] [--repo path]
   quill worktree list [--repo path]
   quill worktree remove [name|path] [--repo path]
-  quill [--model name|default] [--reasoning effort] [--fast true|false] [--config file]
-  quill --which [--config file]
+  quill [--model name|default] [--reasoning effort] [--fast true|false] [provider options] [--config file]
+  quill --which [provider options] [--config file]
   quill --help | --version
 
 Commit message examples:
@@ -74,8 +74,11 @@ Settings examples (no Git or AI work):
                                 Save the Codex model and reasoning effort.
   quill --reasoning high        Change reasoning without changing the model.
   quill --model default         Restore gpt-6-luna and low reasoning; keep fast as is.
-  quill --fast true             Turn Codex fast mode on.
-  quill --fast false            Turn Codex fast mode off.
+  quill --claude --model default
+                                Restore claude-haiku-5-5; keep fast as is.
+  quill --fast true             Turn the selected provider's fast mode on.
+  quill --fast false            Turn the selected provider's fast mode off.
+  quill --claude --fast false   Turn Claude fast mode off (the default).
   quill --which                 Show the configured provider and active settings.
   quill --which --config /path/to/quill.config
                                 Inspect a specific config file.
@@ -86,13 +89,15 @@ Options:
   -p, --push       Push only after a successful commit.
   -f, --full       Same as --add --commit --push.
   --codex, --claude, --gemini, --provider name
-                   Select the AI provider for one execution.
+                   Select the provider for execution, settings, or --which.
   --config file    Read this config for execution or --which; settings edit it.
   --verbose        Show provider output while generating.
   --help           Show this guide. --version prints the installed version.
 
 Settings are saved in a personal quill.config and loaded by future runs.
-Reasoning and fast mode are Quillmit controls for Codex only.
+Settings target the selected provider, otherwise DEFAULT_PROVIDER (Codex by default).
+Reasoning is Codex only. Fast mode supports Codex and Claude; Haiku has no fast mode.
+Claude fast mode is billed as extra usage, not from the subscription allowance.
 TEXT
 }
 
@@ -135,8 +140,9 @@ CODEX_REASONING_EFFORT=low
 CODEX_SERVICE_TIER=fast
 CODEX_FALLBACK_MODEL=gpt-6-luna
 CODEX_FALLBACK_REASONING_EFFORT=low
-CLAUDE_MODEL=haiku
-CLAUDE_FALLBACK_MODEL=haiku
+CLAUDE_MODEL=claude-haiku-5-5
+CLAUDE_FALLBACK_MODEL=claude-haiku-5-5
+CLAUDE_FAST=false
 GEMINI_MODEL=gemini-3-flash-preview
 GEMINI_FALLBACK_MODEL=gemini-3-flash-preview
 CODEX_MAX_PROMPT_BYTES=160000
@@ -313,9 +319,34 @@ if [[ -n "$PR_CREATE_FROM" ]]; then
   [[ -z "$PR_GENERATION_FLAGS" ]] || { print -u2 -- "--create-from cannot be combined with: $PR_GENERATION_FLAGS"; exit 1; }
 fi
 
+if [[ -z "$PR_CREATE_FROM" && -n "$CONFIG_FILE" && -f "$CONFIG_FILE" ]]; then
+  source "$CONFIG_FILE"
+fi
+
+[[ -n "$PROVIDER" ]] || PROVIDER="$DEFAULT_PROVIDER"
+case "$PROVIDER" in
+  codex|claude|gemini) ;;
+  *) print -u2 -- "Unknown provider: $PROVIDER"; exit 1 ;;
+esac
+
+provider_label() {
+  case "$PROVIDER" in
+    codex) print -- "Codex" ;;
+    claude) print -- "Claude" ;;
+    gemini) print -- "Gemini" ;;
+  esac
+}
+
+validate_claude_fast() {
+  if [[ "${1:l}" == *haiku* || "${2:l}" == *haiku* ]]; then
+    print -u2 -- "Haiku has no fast mode. Set CLAUDE_FAST=false or use non-Haiku primary and fallback models."
+    return 1
+  fi
+}
+
 if [[ "$SETTINGS_REQUESTED" -eq 1 ]]; then
   if [[ "$WORKFLOW" != commit || "$MODE" != interactive || "$ADD_ALL" -eq 1 ||
-        "$PUSH_AFTER_COMMIT" -eq 1 || "$VERBOSE" -eq 1 || -n "$PROVIDER" ||
+        "$PUSH_AFTER_COMMIT" -eq 1 || "$VERBOSE" -eq 1 ||
         -n "$REPO_INPUT" || "$WHICH_REQUESTED" -eq 1 ]]; then
     print -u2 -- "Settings commands cannot be combined with execution commands or a repository."
     exit 1
@@ -333,10 +364,26 @@ if [[ "$SETTINGS_REQUESTED" -eq 1 ]]; then
     ""|true|false) ;;
     *) print -u2 -- "--fast must be true or false."; exit 1 ;;
   esac
+  if [[ "$PROVIDER" != codex && -n "$SETTINGS_REASONING" ]]; then
+    print -u2 -- "--reasoning is not supported for $(provider_label)."
+    exit 1
+  fi
+  if [[ "$PROVIDER" == gemini && -n "$SETTINGS_FAST" ]]; then
+    print -u2 -- "--fast is not supported for Gemini."
+    exit 1
+  fi
   if [[ "$SETTINGS_MODEL" == default ]]; then
-    [[ -z "$SETTINGS_REASONING" ]] || { print -u2 -- "--model default already sets reasoning to low."; exit 1; }
-    SETTINGS_MODEL=gpt-6-luna
-    SETTINGS_REASONING=low
+    case "$PROVIDER" in
+      codex)
+        [[ -z "$SETTINGS_REASONING" ]] || { print -u2 -- "--model default already sets reasoning to low."; exit 1; }
+        SETTINGS_MODEL=gpt-6-luna
+        SETTINGS_REASONING=low ;;
+      claude) SETTINGS_MODEL=claude-haiku-5-5 ;;
+      gemini) SETTINGS_MODEL=gemini-3-flash-preview ;;
+    esac
+  fi
+  if [[ "$PROVIDER" == claude && "$SETTINGS_FAST" == true ]]; then
+    validate_claude_fast "${SETTINGS_MODEL:-$CLAUDE_MODEL}" "$CLAUDE_FALLBACK_MODEL" || exit 1
   fi
   if [[ "$CONFIG_EXPLICIT" -eq 0 ]]; then
     CONFIG_FILE="$PERSONAL_CONFIG_FILE"
@@ -350,21 +397,33 @@ if [[ "$SETTINGS_REQUESTED" -eq 1 ]]; then
   fi
   settings_source="$CONFIG_FILE"
   [[ -f "$settings_source" ]] || settings_source="$SCRIPT_DIR/quill.config"
+  settings_model_key="${PROVIDER:u}_MODEL"
+  settings_fast_key=CLAUDE_FAST
+  settings_fast_value="$SETTINGS_FAST"
+  if [[ "$PROVIDER" == codex ]]; then
+    settings_fast_key=CODEX_SERVICE_TIER
+    case "$SETTINGS_FAST" in
+      true) settings_fast_value=fast ;;
+      false) settings_fast_value=default ;;
+    esac
+  fi
   mkdir -p -- "${CONFIG_FILE:h}"
   umask 077
   settings_tmp="$(mktemp "${CONFIG_FILE:h}/.quill.config.XXXXXX")"
   if ! LC_ALL=C awk \
+    -v model_key="$settings_model_key" \
+    -v fast_key="$settings_fast_key" \
     -v model="$SETTINGS_MODEL" \
     -v reasoning="$SETTINGS_REASONING" \
-    -v fast="$SETTINGS_FAST" '
-      /^CODEX_MODEL=/ && model != "" { next }
+    -v fast="$settings_fast_value" '
+      $0 ~ ("^" model_key "=") && model != "" { next }
       /^CODEX_REASONING_EFFORT=/ && reasoning != "" { next }
-      /^CODEX_SERVICE_TIER=/ && fast != "" { next }
+      $0 ~ ("^" fast_key "=") && fast != "" { next }
       { print }
       END {
-        if (model != "") print "CODEX_MODEL=" model
+        if (model != "") print model_key "=" model
         if (reasoning != "") print "CODEX_REASONING_EFFORT=" reasoning
-        if (fast != "") print "CODEX_SERVICE_TIER=" (fast == "true" ? "fast" : "default")
+        if (fast != "") print fast_key "=" fast
       }
     ' "$settings_source" > "$settings_tmp"; then
     rm -f -- "$settings_tmp"
@@ -372,13 +431,13 @@ if [[ "$SETTINGS_REQUESTED" -eq 1 ]]; then
     exit 1
   fi
   mv -f -- "$settings_tmp" "$CONFIG_FILE"
-  print -- "Updated Codex settings in $CONFIG_FILE"
+  print -- "Updated $(provider_label) settings in $CONFIG_FILE"
   exit 0
 fi
 
 if [[ "$WHICH_REQUESTED" -eq 1 ]]; then
   if [[ "$WORKFLOW" != commit || "$MODE" != interactive || "$ADD_ALL" -eq 1 ||
-        "$PUSH_AFTER_COMMIT" -eq 1 || "$VERBOSE" -eq 1 || -n "$PROVIDER" || -n "$REPO_INPUT" ]]; then
+        "$PUSH_AFTER_COMMIT" -eq 1 || "$VERBOSE" -eq 1 || -n "$REPO_INPUT" ]]; then
     print -u2 -- "--which cannot be combined with execution commands or a repository."
     exit 1
   fi
@@ -402,30 +461,6 @@ if [[ "$PUSH_AFTER_COMMIT" -eq 1 && -n "$NON_COMMIT_MODE_FLAGS" ]]; then
   fi
   exit 1
 fi
-
-if [[ -z "$PR_CREATE_FROM" && -n "$CONFIG_FILE" && -f "$CONFIG_FILE" ]]; then
-  source "$CONFIG_FILE"
-fi
-
-if [[ -z "$PROVIDER" ]]; then
-  PROVIDER="$DEFAULT_PROVIDER"
-fi
-
-case "$PROVIDER" in
-  codex|claude|gemini) ;;
-  *)
-    print -u2 -- "Unknown provider: $PROVIDER"
-    exit 1
-    ;;
-esac
-
-provider_label() {
-  case "$PROVIDER" in
-    codex) print -- "Codex" ;;
-    claude) print -- "Claude" ;;
-    gemini) print -- "Gemini" ;;
-  esac
-}
 
 provider_command() {
   case "$PROVIDER" in
@@ -455,9 +490,18 @@ if [[ "$WHICH_REQUESTED" -eq 1 ]]; then
     esac
   else
     print -r -- "Reasoning: n/a (managed by the $PROVIDER CLI)"
-    print -r -- "Fast: false (Codex only)"
+    if [[ "$PROVIDER" == claude ]]; then
+      print -r -- "Fast: $CLAUDE_FAST"
+    else
+      print -r -- "Fast: false (not supported for Gemini)"
+    fi
   fi
   exit 0
+fi
+
+if [[ "$PROVIDER" == claude && "$CLAUDE_FAST" == true &&
+      ( "$WORKFLOW" != worktree || ( "$WT_ACTION" == create && -z "$WT_BRANCH" ) ) ]]; then
+  validate_claude_fast "$CLAUDE_MODEL" "$CLAUDE_FALLBACK_MODEL" || exit 1
 fi
 
 provider_fallback_model() {
@@ -1216,8 +1260,17 @@ run_provider_once() {
       run_provider_command codex "${args[@]}" -o "$message_file" - < "$prompt_file"
       ;;
     claude)
+      local -a args=()
+      if [[ "$CLAUDE_FAST" == true ]]; then
+        args+=(--settings '{"fastMode":true}')
+      fi
       run_provider_command claude \
-        --bare \
+        --safe-mode \
+        --setting-sources "" \
+        --tools "" \
+        --strict-mcp-config \
+        --no-session-persistence \
+        "${args[@]}" \
         -p \
         --model "$model" \
         --output-format text \

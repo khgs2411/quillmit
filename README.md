@@ -26,8 +26,9 @@ The project is Quillmit. The executable is `quill`.
 | Generate a commit message and choose an action | `quill` |
 | Stage all changes, generate a message, commit, and push | `quill -f` |
 | Set the Codex model and reasoning for future runs | `quill --model gpt-6-sol --reasoning high` |
-| Restore the default Codex model and reasoning | `quill --model default` |
-| Turn Codex fast mode on or off | `quill --fast true` / `quill --fast false` |
+| Restore the selected provider's default model | `quill --model default` |
+| Restore the default Claude model | `quill --claude --model default` |
+| Turn the selected provider's fast mode on or off | `quill --fast true` / `quill --fast false` |
 | Show the active provider settings | `quill --which` |
 | Show commands and examples | `quill --help` |
 | Select a PR target and approve the generated content | `quill pr` |
@@ -62,11 +63,17 @@ Use `zsh` and Git on macOS or Linux. For AI generation, install and authenticate
 at least one provider CLI:
 
 - Codex CLI for the default provider.
-- Claude Code CLI for `--claude`.
+- Claude Code CLI with `--safe-mode` support for `--claude` (verified with 2.1.311).
 - Gemini CLI for `--gemini`.
 
 Quillmit does not install or authenticate provider CLIs for you. Worktree listing,
 removal, and creation with `--branch` do not require an AI CLI.
+
+Claude uses your existing Claude Code login; no `ANTHROPIC_API_KEY` is required.
+Calls use [safe mode](https://code.claude.com/docs/en/cli-reference) to exclude
+user and repository `CLAUDE.md`, hooks, plugins, MCP servers, skills, and
+auto-memory. User, project, and local settings are excluded, tools are disabled,
+and sessions are not persisted. Your normal Claude Code sessions are unchanged.
 
 The `quill pr` workflow also requires an installed and authenticated GitHub CLI
 (`gh`).
@@ -582,29 +589,43 @@ the personal config automatically. An installed release has its own bundled
 copy; editing the source checkout does not change that copy.
 
 Settings commands create the personal config from the bundled copy when needed
-and update only the selected Codex settings. They do not run Git or an AI CLI:
+and update only the selected provider's settings. `--codex`, `--claude`, or
+`--provider name` selects the provider; otherwise `DEFAULT_PROVIDER` applies
+(`codex` by default). They do not run Git or an AI CLI:
 
 ```sh
 quill --model gpt-6-sol --reasoning high
 quill --model default              # gpt-6-luna, reasoning low
+quill --claude --model default     # claude-haiku-5-5
 quill --fast true                  # fast service tier
 quill --fast false                 # standard service tier
+quill --claude --fast false        # Claude fast mode off (the default)
 quill --which                      # show the settings Quillmit will use
 quill --help                       # commands, options, and examples
 ```
 
-`--model` alone keeps the current reasoning effort; `--reasoning` can also be
-used alone. `--model default` changes the model and reasoning effort but leaves
+`--model` alone keeps the current reasoning effort. `--reasoning` can also be
+used alone for Codex; it is refused for Claude and Gemini. `--model default`
+restores the selected provider's model (and low reasoning for Codex), leaving
 fast mode as it was. Pass `--config /path/to/quill.config` with a settings command
 to update that existing file instead. Settings flags cannot be combined with an
-execution command. `--which` reads the active config and prints its path, default
+execution command. `--which` reads the active config and prints its path, selected
 provider, model, reasoning, and fast status without starting Git or an AI CLI.
 Use `quill --which --config /path/to/quill.config` to inspect another file. For
-Claude and Gemini, reasoning is managed by their CLI and Quillmit fast mode is
-off because it applies only to Codex.
+Claude and Gemini, reasoning is managed by their CLI. Claude's fast status comes
+from `CLAUDE_FAST`; Gemini has no Quillmit fast setting. Provider flags also apply
+to `--which`, for example `quill --claude --which`.
+
+`CLAUDE_FAST=false` is the default. When true, Quillmit passes
+`--settings '{"fastMode":true}'` for that Claude invocation only. Haiku has no
+fast mode: enabling it is refused if either the primary or fallback model name
+contains `haiku` (case-insensitive), including hand-edited configs at execution.
+Choose non-Haiku primary and fallback models in your config before enabling it
+with `quill --claude --fast true`. [Claude fast mode](https://code.claude.com/docs/en/fast-mode)
+is billed as extra usage, not from the subscription allowance.
 
 For other personal settings, edit the personal config directly. To create it
-without changing a Codex setting, copy the bundled config to that path:
+without changing a provider setting, copy the bundled config to that path:
 
 ```sh
 mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/quillmit"
@@ -627,8 +648,9 @@ CODEX_REASONING_EFFORT=low
 CODEX_SERVICE_TIER=fast
 CODEX_FALLBACK_MODEL=gpt-6-luna
 CODEX_FALLBACK_REASONING_EFFORT=low
-CLAUDE_MODEL=haiku
-CLAUDE_FALLBACK_MODEL=haiku
+CLAUDE_MODEL=claude-haiku-5-5
+CLAUDE_FALLBACK_MODEL=claude-haiku-5-5
+CLAUDE_FAST=false
 GEMINI_MODEL=gemini-3-flash-preview
 GEMINI_FALLBACK_MODEL=gemini-3-flash-preview
 
